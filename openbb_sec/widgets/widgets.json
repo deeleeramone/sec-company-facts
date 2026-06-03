@@ -1,0 +1,438 @@
+{
+  "sec_balance_sheet": {
+    "name": "Balance Sheet",
+    "description": "SEC standardized balance sheet (annual / quarterly / TTM, with optional YoY / PoP transform).",
+    "category": "Financial Statements",
+    "type": "table",
+    "endpoint": "balance_sheet",
+    "gridData": {
+      "w": 40,
+      "h": 18
+    },
+    "data": {
+      "table": {
+        "enableAdvanced": true,
+        "showAll": true,
+        "columnsDefs": [
+          {
+            "field": "Line Item",
+            "headerName": "Line Item",
+            "cellDataType": "text",
+            "renderFn": "hoverCard",
+            "renderFnParams": {
+              "hoverCard": {
+                "cellField": "value",
+                "title": "",
+                "markdown": "### {Line Item}\n\n{description}\n\n### Source Provenance\n{provenance}"
+              }
+            }
+          },
+          {
+            "field": "description",
+            "headerName": "Description",
+            "cellDataType": "text",
+            "hide": true
+          },
+          {
+            "field": "provenance",
+            "headerName": "Source Provenance",
+            "cellDataType": "text",
+            "hide": true
+          }
+        ]
+      }
+    },
+    "params": [
+      {
+        "type": "endpoint",
+        "paramName": "symbol",
+        "label": "Symbol",
+        "value": "AAPL",
+        "description": "Pick a company (ranked by SEC market-cap order).",
+        "optionsEndpoint": "/companies",
+        "searchable": true,
+        "style": {
+          "popupWidth": 950
+        }
+      },
+      {
+        "type": "tabs",
+        "paramName": "period",
+        "label": "Period",
+        "value": "FY",
+        "description": "FY = annual, Q = quarterly, TTM = trailing twelve months. Foreign issuers without quarterly filings will return empty for Q / TTM.",
+        "options": [
+          {
+            "label": "FY",
+            "value": "FY"
+          },
+          {
+            "label": "Q",
+            "value": "Q"
+          },
+          {
+            "label": "TTM",
+            "value": "TTM"
+          }
+        ]
+      },
+      {
+        "type": "tabs",
+        "paramName": "transform",
+        "label": "Transform",
+        "value": "None",
+        "description": "None = raw values; % YoY = year-over-year %; % PoP = period-over-period %. Valid combos: FY+%YoY, Q+%YoY, Q+%PoP, TTM+%PoP.",
+        "options": [
+          {
+            "label": "$",
+            "value": "None"
+          },
+          {
+            "label": "% YoY",
+            "value": "% YoY"
+          },
+          {
+            "label": "% PoP",
+            "value": "% PoP"
+          }
+        ]
+      },
+      {
+        "type": "boolean",
+        "paramName": "transpose",
+        "label": "Transpose",
+        "value": true,
+        "description": "Pivot the table so line items are rows and periods are columns."
+      },
+      {
+        "type": "number",
+        "paramName": "limit",
+        "label": "Limit",
+        "value": 10,
+        "description": "Most-recent N periods (0 = all)."
+      },
+      {
+        "type": "boolean",
+        "paramName": "convert_to_usd",
+        "label": "Convert to USD",
+        "value": true,
+        "description": "Convert reported values to USD using historical ECB exchange rates. Disable to see native reporting currency."
+      }
+    ]
+  },
+  "sec_income_statement": {
+    "name": "Income Statement",
+    "description": "SEC standardized income statement (annual / quarterly / TTM, with optional YoY / PoP transform).",
+    "category": "Financial Statements",
+    "type": "table",
+    "endpoint": "income_statement",
+    "gridData": {
+      "w": 40,
+      "h": 18
+    },
+    "data": {
+      "table": {
+        "enableAdvanced": true,
+        "showAll": true,
+        "columnsDefs": [
+          {
+            "field": "Line Item",
+            "headerName": "Line Item",
+            "cellDataType": "text",
+            "renderFn": "hoverCard",
+            "renderFnParams": {
+              "hoverCard": {
+                "cellField": "value",
+                "title": "",
+                "markdown": "### {Line Item}\n\n{description}\n\n### Source Provenance\n{provenance}"
+              }
+            }
+          },
+          {
+            "field": "description",
+            "headerName": "Description",
+            "cellDataType": "text",
+            "hide": true
+          },
+          {
+            "field": "provenance",
+            "headerName": "Source Provenance",
+            "cellDataType": "text",
+            "hide": true
+          }
+        ]
+      }
+    },
+    "params": [
+      {
+        "type": "endpoint",
+        "paramName": "symbol",
+        "label": "Symbol",
+        "value": "AAPL",
+        "description": "Pick a company (ranked by SEC market-cap order).",
+        "optionsEndpoint": "/companies",
+        "searchable": true,
+        "style": {
+          "popupWidth": 950
+        }
+      },
+      {
+        "type": "tabs",
+        "paramName": "period",
+        "label": "Period",
+        "value": "FY",
+        "description": "FY = annual, Q = quarterly, TTM = trailing twelve months. Foreign issuers without quarterly filings will return empty for Q / TTM.",
+        "options": [
+          {
+            "label": "FY",
+            "value": "FY"
+          },
+          {
+            "label": "Q",
+            "value": "Q"
+          },
+          {
+            "label": "TTM",
+            "value": "TTM"
+          }
+        ]
+      },
+      {
+        "type": "tabs",
+        "paramName": "transform",
+        "label": "Transform",
+        "value": "None",
+        "description": "None = raw values; % YoY = year-over-year %; % PoP = period-over-period %. Valid combos: FY+%YoY, Q+%YoY, Q+%PoP, TTM+%PoP.",
+        "options": [
+          {
+            "label": "$",
+            "value": "None"
+          },
+          {
+            "label": "% YoY",
+            "value": "% YoY"
+          },
+          {
+            "label": "% PoP",
+            "value": "% PoP"
+          }
+        ]
+      },
+      {
+        "type": "boolean",
+        "paramName": "transpose",
+        "label": "Transpose",
+        "value": true,
+        "description": "Pivot the table so line items are rows and periods are columns."
+      },
+      {
+        "type": "number",
+        "paramName": "limit",
+        "label": "Limit",
+        "value": 10,
+        "description": "Most-recent N periods (0 = all)."
+      },
+      {
+        "type": "boolean",
+        "paramName": "convert_to_usd",
+        "label": "Convert to USD",
+        "value": true,
+        "description": "Convert reported values to USD using historical ECB exchange rates. Disable to see native reporting currency."
+      }
+    ]
+  },
+  "sec_cash_flow": {
+    "name": "Cash Flow Statement",
+    "description": "SEC standardized cash flow statement (annual / quarterly / TTM, with optional YoY / PoP transform).",
+    "category": "Financial Statements",
+    "type": "table",
+    "endpoint": "cash_flow",
+    "gridData": {
+      "w": 40,
+      "h": 18
+    },
+    "data": {
+      "table": {
+        "enableAdvanced": true,
+        "showAll": true,
+        "columnsDefs": [
+          {
+            "field": "Line Item",
+            "headerName": "Line Item",
+            "cellDataType": "text",
+            "renderFn": "hoverCard",
+            "renderFnParams": {
+              "hoverCard": {
+                "cellField": "value",
+                "title": "",
+                "markdown": "### {Line Item}\n\n{description}\n\n### Source Provenance\n{provenance}"
+              }
+            }
+          },
+          {
+            "field": "description",
+            "headerName": "Description",
+            "cellDataType": "text",
+            "hide": true
+          },
+          {
+            "field": "provenance",
+            "headerName": "Source Provenance",
+            "cellDataType": "text",
+            "hide": true
+          }
+        ]
+      }
+    },
+    "params": [
+      {
+        "type": "endpoint",
+        "paramName": "symbol",
+        "label": "Symbol",
+        "value": "AAPL",
+        "description": "Pick a company (ranked by SEC market-cap order).",
+        "optionsEndpoint": "/companies",
+        "searchable": true,
+        "style": {
+          "popupWidth": 950
+        }
+      },
+      {
+        "type": "tabs",
+        "paramName": "period",
+        "label": "Period",
+        "value": "FY",
+        "description": "FY = annual, Q = quarterly, TTM = trailing twelve months. Foreign issuers without quarterly filings will return empty for Q / TTM.",
+        "options": [
+          {
+            "label": "FY",
+            "value": "FY"
+          },
+          {
+            "label": "Q",
+            "value": "Q"
+          },
+          {
+            "label": "TTM",
+            "value": "TTM"
+          }
+        ]
+      },
+      {
+        "type": "tabs",
+        "paramName": "transform",
+        "label": "Transform",
+        "value": "None",
+        "description": "None = raw values; % YoY = year-over-year %; % PoP = period-over-period %. Valid combos: FY+%YoY, Q+%YoY, Q+%PoP, TTM+%PoP.",
+        "options": [
+          {
+            "label": "$",
+            "value": "None"
+          },
+          {
+            "label": "% YoY",
+            "value": "% YoY"
+          },
+          {
+            "label": "% PoP",
+            "value": "% PoP"
+          }
+        ]
+      },
+      {
+        "type": "boolean",
+        "paramName": "transpose",
+        "label": "Transpose",
+        "value": true,
+        "description": "Pivot the table so line items are rows and periods are columns."
+      },
+      {
+        "type": "number",
+        "paramName": "limit",
+        "label": "Limit",
+        "value": 10,
+        "description": "Most-recent N periods (0 = all)."
+      },
+      {
+        "type": "boolean",
+        "paramName": "convert_to_usd",
+        "label": "Convert to USD",
+        "value": true,
+        "description": "Convert reported values to USD using historical ECB exchange rates. Disable to see native reporting currency."
+      }
+    ]
+  },
+  "sec_top_companies": {
+    "name": "Top Companies by Metric",
+    "description": "Ranks companies by a standardized financial metric using the most recent full-year (annual) filing. All values converted to USD.",
+    "category": "Financial Statements",
+    "type": "table",
+    "endpoint": "top_companies",
+    "gridData": {
+      "w": 40,
+      "h": 20
+    },
+    "data": {
+      "table": {
+        "enableAdvanced": true,
+        "showAll": true,
+        "columnsDefs": [
+          {
+            "field": "ticker",
+            "headerName": "Ticker",
+            "cellDataType": "text"
+          },
+          {
+            "field": "name",
+            "headerName": "Company",
+            "cellDataType": "text"
+          },
+          {
+            "field": "period_ending",
+            "headerName": "Period Ending",
+            "cellDataType": "text"
+          },
+          {
+            "field": "fiscal_year",
+            "headerName": "FY",
+            "cellDataType": "text"
+          },
+          {
+            "field": "fiscal_period",
+            "headerName": "Period",
+            "cellDataType": "text"
+          },
+          {
+            "field": "currency",
+            "headerName": "Reported Currency",
+            "cellDataType": "text",
+            "hide": true
+          },
+          {
+            "field": "value",
+            "headerName": "Value",
+            "cellDataType": "number"
+          }
+        ]
+      }
+    },
+    "params": [
+      {
+        "type": "endpoint",
+        "paramName": "metric",
+        "label": "Metric",
+        "value": "income_statement|total_revenue",
+        "description": "Financial metric to rank companies by.",
+        "optionsEndpoint": "/metrics",
+        "searchable": false
+      },
+      {
+        "type": "number",
+        "paramName": "limit",
+        "label": "Top N",
+        "value": 25,
+        "description": "Number of companies to return."
+      }
+    ]
+  }
+}

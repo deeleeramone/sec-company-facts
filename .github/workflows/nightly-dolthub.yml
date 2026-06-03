@@ -1,0 +1,135 @@
+name: Nightly DoltHub refresh
+
+on:
+  schedule:
+    - cron: '30 7 * * *'   # 07:30 UTC — adjust as desired
+  workflow_dispatch:
+    inputs:
+      skip_push:
+        description: 'Run pipeline + commit but skip dolt push (dry run)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: dolthub-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      DOLT_REPO: deeleeramone/sec-company-facts
+      # ---- backend selection for openbb_sec.db.ingest ----
+      SEC_DB_BACKEND: dolt
+      DOLT_SQL_HOST: 127.0.0.1
+      DOLT_SQL_PORT: '3306'
+      DOLT_SQL_USER: root
+      DOLT_SQL_PASSWORD: ''
+      # Database name inside the cloned Dolt repo. Dolt exposes each repo as a
+      # MySQL database named after the repo with '-' replaced by '_'.
+      DOLT_SQL_DB: sec_company_facts
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the update code (with Dolt backend extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install '.[dolt]'
+
+      - name: Install Dolt
+        run: |
+          sudo bash -c 'curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash'
+          dolt version
+
+      - name: Configure Dolt identity and DoltHub credential
+        env:
+          DOLTHUB_CREDENTIAL: ${{ secrets.DOLTHUB_CREDENTIAL }}
+        run: |
+          dolt config --global --add user.name  "sec-nightly-bot"
+          dolt config --global --add user.email "85772166+deeleeramone@users.noreply.github.com"
+          printf '%s' "$DOLTHUB_CREDENTIAL" | dolt creds import
+
+      - name: Clone DoltHub repo
+        run: dolt clone "$DOLT_REPO" dolt-repo
+
+      - name: Start dolt sql-server
+        working-directory: dolt-repo
+        run: |
+          # Detached background process; PID file lets the teardown step kill
+          # it deterministically even when the job fails midway.
+          nohup dolt sql-server \
+              --host 127.0.0.1 \
+              --port 3306 \
+              --user root \
+              --no-auto-commit \
+              > "$GITHUB_WORKSPACE/dolt-sqlserver.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/dolt-sqlserver.pid"
+          # Wait for the server to accept TCP connections (up to 60s).
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/3306) >/dev/null 2>&1; then
+              echo "dolt sql-server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "dolt sql-server failed to start within 60s; last log lines:"
+          tail -n 200 "$GITHUB_WORKSPACE/dolt-sqlserver.log" || true
+          exit 1
+
+      - name: Run the SEC update
+        run: python -m openbb_sec.run_pipeline --update
+
+      - name: Commit and push to DoltHub via SQL
+        if: ${{ ! inputs.skip_push }}
+        env:
+          COMMIT_MSG_PREFIX: "Nightly SEC refresh"
+        run: |
+          # All writes have flushed through the running sql-server. Use
+          # CALL DOLT_* stored procedures so the running server stays the sole
+          # writer of the cloned repo (mixing `dolt` CLI writes with a live
+          # sql-server is unsafe due to file-lock contention).
+          MSG="${COMMIT_MSG_PREFIX} ($(date -u +%Y-%m-%d))"
+          dolt sql \
+            --host 127.0.0.1 --port 3306 --user root \
+            --query "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); CALL DOLT_PUSH('origin', 'main');"
+
+      - name: Commit only (dry run) via SQL
+        if: ${{ inputs.skip_push }}
+        env:
+          COMMIT_MSG_PREFIX: "Nightly SEC refresh DRY RUN"
+        run: |
+          MSG="${COMMIT_MSG_PREFIX} ($(date -u +%Y-%m-%d))"
+          dolt sql \
+            --host 127.0.0.1 --port 3306 --user root \
+            --query "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); SELECT 'push skipped' AS note;"
+
+      - name: Stop dolt sql-server
+        if: always()
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/dolt-sqlserver.pid" ]; then
+            pid=$(cat "$GITHUB_WORKSPACE/dolt-sqlserver.pid")
+            kill "$pid" 2>/dev/null || true
+            # Give it a moment to shut down cleanly before SIGKILL.
+            for i in $(seq 1 10); do
+              if kill -0 "$pid" 2>/dev/null; then sleep 1; else break; fi
+            done
+            kill -9 "$pid" 2>/dev/null || true
+          fi
+          if [ -f "$GITHUB_WORKSPACE/dolt-sqlserver.log" ]; then
+            echo "==== dolt sql-server last 200 log lines ===="
+            tail -n 200 "$GITHUB_WORKSPACE/dolt-sqlserver.log" || true
+          fi
+
+      - name: Upload dolt sql-server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolt-sqlserver-log
+          path: dolt-sqlserver.log
+          if-no-files-found: ignore
