@@ -66,7 +66,6 @@ jobs:
           nohup dolt sql-server \
               --host 127.0.0.1 \
               --port 3306 \
-              --user root \
               --no-auto-commit \
               > "$GITHUB_WORKSPACE/dolt-sqlserver.log" 2>&1 &
           echo $! > "$GITHUB_WORKSPACE/dolt-sqlserver.pid"
