@@ -26,8 +26,10 @@ jobs:
       DOLT_SQL_PORT: '3306'
       DOLT_SQL_USER: root
       DOLT_SQL_PASSWORD: ''
-      # Database name inside the cloned Dolt repo. Dolt exposes each repo as a
-      # MySQL database named after the repo with '-' replaced by '_'.
+      # Database name inside the cloned Dolt repo. Dolt exposes the repo as
+      # a MySQL database named after the clone *directory* (with '-' replaced
+      # by '_'), not the upstream repo name. Keep this in sync with the
+      # directory passed to `dolt clone` below.
       DOLT_SQL_DB: sec_company_facts
 
     steps:
@@ -56,10 +58,12 @@ jobs:
           printf '%s' "$DOLTHUB_CREDENTIAL" | dolt creds import
 
       - name: Clone DoltHub repo
-        run: dolt clone "$DOLT_REPO" dolt-repo
+        # Clone into a directory whose name matches DOLT_SQL_DB — the
+        # sql-server picks up the database name from the directory.
+        run: dolt clone "$DOLT_REPO" sec_company_facts
 
       - name: Start dolt sql-server
-        working-directory: dolt-repo
+        working-directory: sec_company_facts
         run: |
           # Detached background process; PID file lets the teardown step kill
           # it deterministically even when the job fails midway.
