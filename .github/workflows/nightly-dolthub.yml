@@ -31,6 +31,8 @@ jobs:
       # by '_'), not the upstream repo name. Keep this in sync with the
       # directory passed to `dolt clone` below.
       DOLT_SQL_DB: sec_company_facts
+      # Override the default /var/cache/openbb_sec (not writable on GH runners).
+      SEC_DOWNLOAD_CACHE: ${{ github.workspace }}/.sec-cache
 
     steps:
       - uses: actions/checkout@v4
