@@ -53,8 +53,7 @@ def _derived_counts(db_path: str | None = None) -> tuple[int, int]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m openbb_sec.run_pipeline")
     parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--limit", type=int, default=None,
-                        help="Limit CIKs for smoke tests")
+    parser.add_argument("--limit", type=int, default=None, help="Limit CIKs for smoke tests")
     parser.add_argument(
         "--update",
         action="store_true",
@@ -65,8 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--download-cache",
-        help="Directory for SEC bulk-data downloads. Defaults to "
-        "$SEC_DOWNLOAD_CACHE or /var/cache/openbb_sec.",
+        help="Directory for SEC bulk-data downloads. Defaults to $SEC_DOWNLOAD_CACHE or /var/cache/openbb_sec.",
     )
     parser.add_argument("--skip-facts", action="store_true")
     parser.add_argument("--skip-xref", action="store_true")
@@ -94,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
         print(
-            f"\n=== UPDATE TOTAL {time.time()-t_total:.1f}s  "
+            f"\n=== UPDATE TOTAL {time.time() - t_total:.1f}s  "
             f"changed_facts={result['changed_facts']:,}  "
             f"changed_subs={result['changed_subs']:,} ===",
             flush=True,
@@ -129,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n=== STAGE 1: companyfacts ===", flush=True)
         t0 = time.time()
         from openbb_sec.db.ingest import download_companyfacts_zip
+
         companyfacts_zip = download_companyfacts_zip(
             None if not args.download_cache else os.path.join(args.download_cache, "companyfacts.zip")
         )
@@ -151,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n=== STAGE 4: submissions.zip ===", flush=True)
         t0 = time.time()
         from openbb_sec.db.ingest import download_submissions_zip
+
         submissions_zip = download_submissions_zip(
             None if not args.download_cache else os.path.join(args.download_cache, "submissions.zip")
         )
@@ -161,20 +161,32 @@ def main(argv: list[str] | None = None) -> int:
         print("\n=== STAGE 5: standardized_statements ===", flush=True)
         t0 = time.time()
         pre_processed, pre_std = _derived_counts()
-        print(f"[stage5] pre-run: processed_ciks_with_statements={pre_processed:,}  standardized_rows={pre_std:,}", flush=True)
+        print(
+            f"[stage5] pre-run: processed_ciks_with_statements={pre_processed:,}  standardized_rows={pre_std:,}",
+            flush=True,
+        )
         if pre_std > 0:
             # Single-pass design: standardized statements are materialized inline
             # during Stage 1 ingest. They are already present, so skip the
             # redundant second pass over the DB.
-            print(f"[stage5] already materialized inline during Stage 1 (rows={pre_std:,}); skipping second pass", flush=True)
+            print(
+                f"[stage5] already materialized inline during Stage 1 (rows={pre_std:,}); skipping second pass",
+                flush=True,
+            )
         else:
             # Recovery only: facts were unchanged (nothing re-ingested) yet
             # standardized is empty — materialize from what is in the DB.
             std_result = materialize_standardized_statements(workers=args.workers)
             post_processed, post_std = _derived_counts()
-            print(f"[stage5] post-run: processed_ciks_with_statements={post_processed:,}  standardized_rows={post_std:,}  returned={std_result}", flush=True)
+            print(
+                f"[stage5] post-run: processed_ciks_with_statements={post_processed:,}  standardized_rows={post_std:,}  returned={std_result}",
+                flush=True,
+            )
             if pre_processed > 0 and post_std == 0:
-                print("[pipeline] ERROR: standardized_statements is still 0 after materialize — check logs above for FAILED lines", flush=True)
+                print(
+                    "[pipeline] ERROR: standardized_statements is still 0 after materialize — check logs above for FAILED lines",
+                    flush=True,
+                )
         times["standardized"] = time.time() - t0
 
     if not args.skip_rates:
@@ -189,9 +201,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n=== TOTAL ===")
     for k, v in times.items():
-        print(f"  {k:>14s}: {v:>7.1f}s ({v/60:.1f} min)")
-    print(f"  {'total':>14s}: {time.time()-t_total:.1f}s")
-    print(f"Peak RSS: {peak_rss[0]/(1024*1024):.0f} MB  Peak USS: {peak_uss[0]/(1024*1024):.0f} MB")
+        print(f"  {k:>14s}: {v:>7.1f}s ({v / 60:.1f} min)")
+    print(f"  {'total':>14s}: {time.time() - t_total:.1f}s")
+    print(f"Peak RSS: {peak_rss[0] / (1024 * 1024):.0f} MB  Peak USS: {peak_uss[0] / (1024 * 1024):.0f} MB")
     return 0
 
 

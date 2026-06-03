@@ -47,6 +47,7 @@ def using_dolt() -> bool:
 # DuckDB backend
 # --------------------------------------------------------------------------- #
 
+
 class DuckDBConn:
     """Thin wrapper that exposes a stable surface over a DuckDB connection.
 
@@ -77,6 +78,7 @@ class DuckDBConn:
         if not rows:
             return
         import uuid as _uuid
+
         view = f"_batch_{_uuid.uuid4().hex}"
         arr = pa.Table.from_pylist(rows, schema=schema)
         self._conn.register(view, arr)
@@ -265,15 +267,10 @@ class DoltConn:
                 base = self._next_id_block(unqualified, len(chunk))
                 values: list[tuple] = []
                 for j, row in enumerate(chunk):
-                    values.append(
-                        (base + j, *[_pyval(row.get(c)) for c in names])
-                    )
+                    values.append((base + j, *[_pyval(row.get(c)) for c in names]))
             else:
                 values = [tuple(_pyval(row.get(c)) for c in names) for row in chunk]
-            sql = (
-                f"INSERT INTO {unqualified} ({col_sql}) VALUES "
-                + ",".join([placeholders] * len(values))
-            )
+            sql = f"INSERT INTO {unqualified} ({col_sql}) VALUES " + ",".join([placeholders] * len(values))
             cur.execute(sql, [v for tup in values for v in tup])
 
     def create_temp_table(self, name: str, columns_sql: str) -> None:
@@ -315,13 +312,12 @@ class DoltConn:
 # Connection factories
 # --------------------------------------------------------------------------- #
 
+
 def connect_dolt() -> DoltConn:
     try:
         import pymysql  # type: ignore
     except ImportError as err:  # pragma: no cover - import guard
-        raise RuntimeError(
-            "SEC_DB_BACKEND=dolt requires pymysql. Install with: pip install '.[dolt]'"
-        ) from err
+        raise RuntimeError("SEC_DB_BACKEND=dolt requires pymysql. Install with: pip install '.[dolt]'") from err
 
     host = os.environ.get("DOLT_SQL_HOST", "127.0.0.1")
     port = int(os.environ.get("DOLT_SQL_PORT", "3306"))

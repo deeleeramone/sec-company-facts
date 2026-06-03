@@ -302,7 +302,9 @@ def _existing_payload_hashes(conn, table: str) -> dict[str, str]:
     return hashes
 
 
-def _iter_companyfacts_zip(zip_path: str | Path, only_ciks: set[str] | None = None) -> Iterator[tuple[str, bytes, datetime]]:
+def _iter_companyfacts_zip(
+    zip_path: str | Path, only_ciks: set[str] | None = None
+) -> Iterator[tuple[str, bytes, datetime]]:
     with zipfile.ZipFile(zip_path) as zf:
         for info in zf.infolist():
             cik = _cik_from_filename(info.filename)
@@ -340,7 +342,9 @@ def _merge_overflow_filings(main: dict[str, Any], overflow: dict[str, Any]) -> N
             recent[key] = list(values)
 
 
-def _iter_submissions_zip(zip_path: str | Path, cik_filter: set[str] | None = None) -> Iterator[tuple[str, dict[str, Any], datetime]]:
+def _iter_submissions_zip(
+    zip_path: str | Path, cik_filter: set[str] | None = None
+) -> Iterator[tuple[str, dict[str, Any], datetime]]:
     with zipfile.ZipFile(zip_path) as zf:
         for info in zf.infolist():
             cik = _cik_from_filename(info.filename)
@@ -646,7 +650,10 @@ def ingest_companyfacts_zip(
             print(f"[facts] cik={cik_norm} no fact values — skipping (company not inserted)", flush=True)
             continue
 
-        print(f"[facts] cik={cik_norm} insert start companies={len(companies):,} tag_meta={len(tag_meta):,} facts={len(facts):,}", flush=True)
+        print(
+            f"[facts] cik={cik_norm} insert start companies={len(companies):,} tag_meta={len(tag_meta):,} facts={len(facts):,}",
+            flush=True,
+        )
         _insert_arrow(conn, _table("companies"), companies, _COMPANIES_SCHEMA)
         _insert_arrow(conn, _table("tag_meta"), tag_meta, _TAG_META_SCHEMA)
         _insert_arrow(conn, _table("facts"), facts, _FACTS_SCHEMA)
@@ -657,8 +664,7 @@ def ingest_companyfacts_zip(
         # tag sets); others are skipped entirely — never blindly resolved/inserted.
         # Set SEC_INLINE_STANDARDIZED=0 to disable and use the standalone step.
         has_statements = any(
-            tm["namespace"] in ("us-gaap", "ifrs-full") and tm["tag"] in _all_stmt_tags
-            for tm in tag_meta
+            tm["namespace"] in ("us-gaap", "ifrs-full") and tm["tag"] in _all_stmt_tags for tm in tag_meta
         )
         if has_statements and inline_on:
             # Queue the (CPU-heavy) resolve for the worker pool; the standardized
@@ -789,7 +795,7 @@ def compute_processed_ciks(
                     MAX(CASE WHEN m.stmt = 'balance_sheet' THEN 1 ELSE 0 END) AS has_balance,
                     MAX(CASE WHEN m.stmt = 'income_statement' THEN 1 ELSE 0 END) AS has_income,
                     MAX(CASE WHEN m.stmt = 'cash_flow' THEN 1 ELSE 0 END) AS has_cash_flow
-                FROM {_table('tag_meta')} tm
+                FROM {_table("tag_meta")} tm
                 JOIN _stmt_tag_map m ON m.tag = tm.tag
                 WHERE tm.namespace IN ('us-gaap', 'ifrs-full')
                 GROUP BY tm.cik
@@ -798,16 +804,14 @@ def compute_processed_ciks(
             target_rows = [{"cik": cik} for cik in sorted(only_ciks)]
             conn.create_temp_table("_target_ciks", "cik VARCHAR(10)")
             _insert_arrow(conn, "_target_ciks", target_rows, pa.schema([("cik", pa.string())]))
-            conn.execute(
-                f"DELETE FROM {_table('processed_ciks')} WHERE cik IN (SELECT cik FROM _target_ciks)"
-            )
+            conn.execute(f"DELETE FROM {_table('processed_ciks')} WHERE cik IN (SELECT cik FROM _target_ciks)")
             source_sql = f"""
                 SELECT
                     tm.cik,
                     MAX(CASE WHEN m.stmt = 'balance_sheet' THEN 1 ELSE 0 END) AS has_balance,
                     MAX(CASE WHEN m.stmt = 'income_statement' THEN 1 ELSE 0 END) AS has_income,
                     MAX(CASE WHEN m.stmt = 'cash_flow' THEN 1 ELSE 0 END) AS has_cash_flow
-                FROM {_table('tag_meta')} tm
+                FROM {_table("tag_meta")} tm
                 JOIN _target_ciks t ON t.cik = tm.cik
                 JOIN _stmt_tag_map m ON m.tag = tm.tag
                 WHERE tm.namespace IN ('us-gaap', 'ifrs-full')
@@ -817,7 +821,7 @@ def compute_processed_ciks(
         now = datetime.now().replace(microsecond=0)
         conn.execute(
             f"""
-            INSERT INTO {_table('processed_ciks')} (cik, has_balance, has_income, has_cash_flow, computed_at)
+            INSERT INTO {_table("processed_ciks")} (cik, has_balance, has_income, has_cash_flow, computed_at)
             SELECT cik, has_balance = 1, has_income = 1, has_cash_flow = 1, ?
             FROM ({source_sql}) q
             WHERE has_balance = 1 OR has_income = 1 OR has_cash_flow = 1
@@ -832,7 +836,7 @@ def compute_processed_ciks(
                 SUM(CASE WHEN has_balance THEN 1 ELSE 0 END) AS with_balance,
                 SUM(CASE WHEN has_income THEN 1 ELSE 0 END) AS with_income,
                 SUM(CASE WHEN has_cash_flow THEN 1 ELSE 0 END) AS with_cash_flow
-            FROM {_table('processed_ciks')}
+            FROM {_table("processed_ciks")}
             WHERE computed_at = ?
             """,
             [now],
@@ -885,9 +889,7 @@ def ingest_submissions_zip(
     stats = {"files_processed": 0, "changed": 0, "submissions": 0, "dei_facts": 0}
     print(f"[submissions] scan start zip={zip_path}", flush=True)
 
-    dei_numeric = (
-        ("EntitySicCode", "sic", "Standard Industrial Classification (SIC) Code"),
-    )
+    dei_numeric = (("EntitySicCode", "sic", "Standard Industrial Classification (SIC) Code"),)
     dei_text = (
         ("EntityType", "entityType", "Entity Type"),
         ("EntityFilerCategory", "category", "Entity Filer Category"),
@@ -1014,7 +1016,7 @@ def _load_company_facts_from_conn(conn, cik: str) -> dict[str, Any]:
     ).fetchall()
     fact_rows = conn.execute(
         f'SELECT namespace, tag, unit, start, "end", val, val_text, accn, fy, fp, form, filed, frame '
-        f"FROM {_table('facts')} WHERE cik = ? ORDER BY namespace, tag, unit, \"end\", filed",
+        f'FROM {_table("facts")} WHERE cik = ? ORDER BY namespace, tag, unit, "end", filed',
         [cik_padded],
     ).fetchall()
     if verbose:
@@ -1430,7 +1432,9 @@ def run_update(
                 facts: list[dict[str, Any]] = []
 
                 end_date = mtime.date()
-                for tag, source_key, description in (("EntitySicCode", "sic", "Standard Industrial Classification (SIC) Code"),):
+                for tag, source_key, description in (
+                    ("EntitySicCode", "sic", "Standard Industrial Classification (SIC) Code"),
+                ):
                     raw = data.get(source_key)
                     if raw in (None, ""):
                         continue
@@ -1438,7 +1442,9 @@ def run_update(
                         val_f = float(str(raw))
                     except (TypeError, ValueError):
                         continue
-                    tag_meta.append({"cik": cik, "namespace": "dei", "tag": tag, "label": tag, "description": description})
+                    tag_meta.append(
+                        {"cik": cik, "namespace": "dei", "tag": tag, "label": tag, "description": description}
+                    )
                     facts.append(
                         {
                             "cik": cik,
@@ -1470,7 +1476,9 @@ def run_update(
                     raw = data.get(source_key)
                     if raw in (None, ""):
                         continue
-                    tag_meta.append({"cik": cik, "namespace": "dei", "tag": tag, "label": tag, "description": description})
+                    tag_meta.append(
+                        {"cik": cik, "namespace": "dei", "tag": tag, "label": tag, "description": description}
+                    )
                     facts.append(
                         {
                             "cik": cik,
