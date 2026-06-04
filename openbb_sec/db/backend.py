@@ -354,6 +354,11 @@ def connect_dolt() -> DoltConn:
         connect_timeout=60,
         read_timeout=600,
         write_timeout=600,
+        # ANSI_QUOTES makes Dolt/MySQL treat "ident" as an identifier (like
+        # DuckDB/Postgres) instead of a string literal, so SELECT statements
+        # that quote reserved column names such as "end" / "start" return the
+        # column value rather than the literal string.
+        init_command="SET SESSION sql_mode='ANSI_QUOTES'",
     )
     print(f"[db] dolt connected host={host} port={port} db={database}", flush=True)
     return DoltConn(conn)
