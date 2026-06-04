@@ -998,6 +998,15 @@ def ingest_submissions_zip(
     return stats
 
 
+def _iso(v):
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v
+    iso = getattr(v, "isoformat", None)
+    return iso() if callable(iso) else str(v)
+
+
 def _load_company_facts_from_conn(conn, cik: str) -> dict[str, Any]:
     """Load company facts using an already-open connection to avoid second-connection conflicts."""
     verbose = os.environ.get("SEC_LOAD_VERBOSE", "1") == "1"
@@ -1033,16 +1042,16 @@ def _load_company_facts_from_conn(conn, cik: str) -> dict[str, Any]:
         tag_entry = ns.setdefault(tag, {"label": None, "description": None, "units": {}})
         unit_list = tag_entry["units"].setdefault(unit, [])
         record: dict[str, Any] = {
-            "end": end.isoformat() if end is not None else None,
+            "end": _iso(end),
             "val": val_text if val_text else val,
             "accn": accn,
             "fy": fy,
             "fp": fp,
             "form": form,
-            "filed": filed.isoformat() if filed is not None else None,
+            "filed": _iso(filed),
         }
         if start is not None:
-            record["start"] = start.isoformat()
+            record["start"] = _iso(start)
         if frame:
             record["frame"] = frame
         unit_list.append(record)

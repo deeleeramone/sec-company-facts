@@ -100,9 +100,8 @@ jobs:
           # writer of the cloned repo (mixing `dolt` CLI writes with a live
           # sql-server is unsafe due to file-lock contention).
           MSG="${COMMIT_MSG_PREFIX} ($(date -u +%Y-%m-%d))"
-          dolt sql \
-            --host 127.0.0.1 --port 3306 --user root \
-            --query "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); CALL DOLT_PUSH('origin', 'main');"
+          mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root \
+            -e "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); CALL DOLT_PUSH('origin', 'main');"
 
       - name: Commit only (dry run) via SQL
         if: ${{ inputs.skip_push }}
@@ -110,9 +109,8 @@ jobs:
           COMMIT_MSG_PREFIX: "Nightly SEC refresh DRY RUN"
         run: |
           MSG="${COMMIT_MSG_PREFIX} ($(date -u +%Y-%m-%d))"
-          dolt sql \
-            --host 127.0.0.1 --port 3306 --user root \
-            --query "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); SELECT 'push skipped' AS note;"
+          mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root \
+            -e "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); SELECT 'push skipped' AS note;"
 
       - name: Stop dolt sql-server
         if: always()

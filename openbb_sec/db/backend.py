@@ -87,6 +87,10 @@ class DuckDBConn:
         finally:
             self._conn.unregister(view)
 
+    def executemany(self, sql: str, seq_of_params) -> None:
+        for params in seq_of_params:
+            self._conn.execute(sql, list(params))
+
     def create_temp_table(self, name: str, columns_sql: str) -> None:
         self._conn.execute(f"DROP TABLE IF EXISTS {name}")
         self._conn.execute(f"CREATE TEMP TABLE {name} ({columns_sql})")
@@ -277,6 +281,14 @@ class DoltConn:
         cur = self._conn.cursor()
         cur.execute(f"DROP TEMPORARY TABLE IF EXISTS {name}")
         cur.execute(f"CREATE TEMPORARY TABLE {name} ({columns_sql})")
+
+    def executemany(self, sql: str, seq_of_params) -> None:
+        seq = list(seq_of_params)
+        if not seq:
+            return
+        cur = self._conn.cursor()
+        sql_my = _translate_placeholders(sql)
+        cur.executemany(sql_my, [tuple(_pyval(p) for p in params) for params in seq])
 
     # ---- txn / lifecycle --------------------------------------------- #
 
