@@ -1,38 +1,23 @@
 [tool.poetry]
-name = "openbb-sec"
-version = "1.6.0"
-description = "SEC extension for OpenBB"
+name = "sec-app"
+version = "0.1.0"
+description = "Serving layer (Dolt SQL server + widgets API) for SEC company facts. Consumes the openbb-sec provider from PyPI."
 authors = ["OpenBB Team <hello@openbb.co>"]
 license = "AGPL-3.0-only"
 readme = "README.md"
-packages = [{ include = "openbb_sec" }]
+packages = [{ include = "sec_app" }]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<4"
-openbb-core = "^1.6.3"
-aiohttp-client-cache = "^0.11.0"
-aiosqlite = "^0.20.0"
-defusedxml = ">=0.7.1"
-xmltodict = "^0.13.0"
-beautifulsoup4 = "^4.12"
-lxml = ">=5.2.1"
-chdb = "^4.1"
+# The SEC provider (models/fetchers + company-facts standardization) comes from PyPI.
+openbb-sec = ">=1.6.1"
+fastapi = ">=0.110"
+uvicorn = { version = ">=0.30", extras = ["standard"] }
+pymysql = "^1.1"
 pyarrow = ">=17"
-duckdb = "^1.1"
 pandas = ">=2.0"
 psutil = ">=5.9"
-# Optional: required when SEC_DB_BACKEND=dolt (nightly DoltHub refresh job).
-pymysql = { version = "^1.1", optional = true }
-# Optional: required to run the widgets HTTP server.
-fastapi = { version = ">=0.110", optional = true }
-
-[tool.poetry.extras]
-dolt = ["pymysql"]
-widgets = ["fastapi"]
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
-
-[tool.poetry.plugins."openbb_provider_extension"]
-sec = "openbb_sec:sec_provider"

@@ -1,0 +1,23 @@
+# Build artifacts and local dev files that don't belong in either image.
+.git
+.github
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+dist
+build
+*.egg-info
+node_modules
+.DS_Store
+# Local DuckDB caches — never bake into the image.
+*.duckdb
+*.duckdb.wal
+.sec-cache

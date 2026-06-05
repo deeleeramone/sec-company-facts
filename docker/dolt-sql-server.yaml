@@ -1,0 +1,17 @@
+log_level: info
+
+behavior:
+  read_only: true
+
+system_variables:
+  dolt_stats_enabled: 0
+
+listener:
+  host: 127.0.0.1
+  port: 3306
+  max_connections: 100
+  read_timeout_millis: 600000
+  write_timeout_millis: 600000
+
+performance:
+  query_parallelism: 2

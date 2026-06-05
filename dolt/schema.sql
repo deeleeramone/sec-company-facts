@@ -119,8 +119,11 @@ CREATE TABLE standardized_statements (
   val             DOUBLE,
   currency        VARCHAR(8),
   company_type    VARCHAR(16),
+  source          VARCHAR(256),
   PRIMARY KEY (cik, statement, period_ending, fiscal_year, fiscal_period, tag),
-  KEY idx_std_cik (cik)
+  KEY idx_std_cik (cik),
+  KEY idx_std_tag_freq (tag, frequency, statement),
+  KEY idx_std_tag_period (tag, period_ending)
 );
 
 CREATE TABLE submissions (

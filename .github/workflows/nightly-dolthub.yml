@@ -20,8 +20,7 @@ jobs:
     timeout-minutes: 240
     env:
       DOLT_REPO: deeleeramone/sec-company-facts
-      # ---- backend selection for openbb_sec.db.ingest ----
-      SEC_DB_BACKEND: dolt
+      # ---- Dolt connection for sec_app.db.ingest ----
       DOLT_SQL_HOST: 127.0.0.1
       DOLT_SQL_PORT: '3306'
       DOLT_SQL_USER: root
@@ -41,10 +40,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install the update code (with Dolt backend extras)
+      - name: Install sec-app (pulls openbb-sec + ingest deps from PyPI)
         run: |
           python -m pip install --upgrade pip
-          pip install '.[dolt]'
+          pip install .
 
       - name: Install Dolt
         run: |
@@ -88,7 +87,7 @@ jobs:
           exit 1
 
       - name: Run the SEC update
-        run: python -m openbb_sec.run_pipeline --update
+        run: python -m sec_app.run_pipeline --update
 
       - name: Commit and push to DoltHub via SQL
         if: ${{ ! inputs.skip_push }}

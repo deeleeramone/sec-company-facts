@@ -1,0 +1,25 @@
+services:
+  widgets:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.app
+    image: sec-company-facts/widgets:latest
+    environment:
+      DOLT_SQL_DB: ${DOLT_SQL_DB:-sec_company_facts}
+      DOLT_SQL_HOST: 127.0.0.1
+      DOLT_SQL_PORT: 3306
+      GOMEMLIMIT: ${GOMEMLIMIT:-1536MiB}
+      GOGC: ${GOGC:-30}
+      WIDGETS_WORKERS: ${WIDGETS_WORKERS:-1}
+    ports:
+      - "${WIDGETS_PORT:-8000}:8000"
+    volumes:
+      # Host DoltHub clone (must contain .dolt); mounted rw for dolt's lock files.
+      - ${DOLT_HOST_CLONE:-${HOME}/dolthub/sec-company-facts}:/data/sec_company_facts
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: ${WIDGETS_MEMORY_LIMIT:-2G}
+    mem_limit: ${WIDGETS_MEMORY_LIMIT:-2G}
+    memswap_limit: ${WIDGETS_MEMORY_LIMIT:-2G}
