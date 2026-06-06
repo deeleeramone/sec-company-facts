@@ -718,7 +718,11 @@ def _load_statement_tag_sets() -> dict[str, set[str]]:
     CIKs get standardized statements materialized. A CIK whose tags intersect
     none of these sets is never resolved or inserted.
     """
-    schema_dir = Path(__file__).resolve().parent.parent / "utils" / "statement_schema" / "schemas"
+    # The statement-schema JSONs ship inside the openbb-sec provider (PyPI), not
+    # in this serving package.
+    import openbb_sec.utils.statement_schema as _statement_schema_pkg  # pylint: disable=import-outside-toplevel
+
+    schema_dir = Path(_statement_schema_pkg.__file__).resolve().parent / "schemas"
     tag_sets: dict[str, set[str]] = {}
     for stmt in ("balance_sheet", "income_statement", "cash_flow"):
         with open(schema_dir / f"{stmt}.json") as fh:
