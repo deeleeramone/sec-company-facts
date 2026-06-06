@@ -25,12 +25,7 @@ jobs:
       DOLT_SQL_PORT: '3306'
       DOLT_SQL_USER: root
       DOLT_SQL_PASSWORD: ''
-      # Database name inside the cloned Dolt repo. Dolt exposes the repo as
-      # a MySQL database named after the clone *directory* (with '-' replaced
-      # by '_'), not the upstream repo name. Keep this in sync with the
-      # directory passed to `dolt clone` below.
       DOLT_SQL_DB: sec_company_facts
-      # Override the default /var/cache/openbb_sec (not writable on GH runners).
       SEC_DOWNLOAD_CACHE: ${{ github.workspace }}/.sec-cache
 
     steps:
@@ -94,10 +89,6 @@ jobs:
         env:
           COMMIT_MSG_PREFIX: "Nightly SEC refresh"
         run: |
-          # All writes have flushed through the running sql-server. Use
-          # CALL DOLT_* stored procedures so the running server stays the sole
-          # writer of the cloned repo (mixing `dolt` CLI writes with a live
-          # sql-server is unsafe due to file-lock contention).
           MSG="${COMMIT_MSG_PREFIX} ($(date -u +%Y-%m-%d))"
           mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root \
             -e "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); CALL DOLT_PUSH('origin', 'main');"
