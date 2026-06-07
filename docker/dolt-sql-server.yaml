@@ -8,6 +8,13 @@ behavior:
 
 system_variables:
   dolt_stats_enabled: 0
+  # Read replication: auto-pull from the DoltHub remote ('origin', set by the
+  # initial clone) at transaction start so the served data tracks the nightly
+  # refresh without a restart. Async keeps reads non-blocking (eventually
+  # consistent); the server stays read_only.
+  dolt_read_replica_remote: origin
+  dolt_replicate_heads: main
+  dolt_async_replication: 1
 
 listener:
   host: 127.0.0.1

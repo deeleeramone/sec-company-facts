@@ -1,21 +1,27 @@
 services:
   widgets:
+    # Pull the published image with `docker compose pull`, or build locally with
+    # `docker compose build` (the build section below takes over in that case).
+    image: ${WIDGETS_IMAGE:-ghcr.io/deeleeramone/sec-company-facts:latest}
     build:
       context: .
       dockerfile: docker/Dockerfile.app
-    image: sec-company-facts/widgets:latest
     environment:
       DOLT_SQL_DB: ${DOLT_SQL_DB:-sec_company_facts}
       DOLT_SQL_HOST: 127.0.0.1
       DOLT_SQL_PORT: 3306
+      DOLT_REMOTE: ${DOLT_REMOTE:-deeleeramone/sec-company-facts}
       GOMEMLIMIT: ${GOMEMLIMIT:-1536MiB}
       GOGC: ${GOGC:-30}
       WIDGETS_WORKERS: ${WIDGETS_WORKERS:-1}
     ports:
       - "${WIDGETS_PORT:-8000}:8000"
     volumes:
-      # Host DoltHub clone (must contain .dolt); mounted rw for dolt's lock files.
-      - ${DOLT_HOST_CLONE:-${HOME}/dolthub/sec-company-facts}:/data/sec_company_facts
+      # Defaults to a named volume — the container clones the DB from DoltHub on
+      # first start (or uses the baked-in copy) and persists it across restarts.
+      # Set DOLT_HOST_CLONE to a host path containing a .dolt dir to bind a local
+      # DoltHub clone instead.
+      - ${DOLT_HOST_CLONE:-sec_dolt_data}:/data/sec_company_facts
     restart: unless-stopped
     deploy:
       resources:
@@ -23,3 +29,6 @@ services:
           memory: ${WIDGETS_MEMORY_LIMIT:-2G}
     mem_limit: ${WIDGETS_MEMORY_LIMIT:-2G}
     memswap_limit: ${WIDGETS_MEMORY_LIMIT:-2G}
+
+volumes:
+  sec_dolt_data:

@@ -1,6 +1,8 @@
 FROM python:3.12-slim-bookworm
 
 ARG DOLT_VERSION=2.1.2
+ARG DOLT_REMOTE=deeleeramone/sec-company-facts
+ARG BAKE_DATA=false
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -43,6 +45,11 @@ RUN pip install \
 
 COPY sec_app ./sec_app
 
+RUN if [ "$BAKE_DATA" = "true" ]; then \
+        mkdir -p /data \
+        && dolt clone "$DOLT_REMOTE" /data/sec_company_facts ; \
+    fi
+
 RUN useradd -u 1000 -m -s /bin/bash app \
     && mkdir -p /data \
     && chown -R app:app /app /data
@@ -55,6 +62,7 @@ ENV PYTHONPATH=/app \
     DOLT_SQL_DB=sec_company_facts \
     DOLT_SQL_USER=root \
     DOLT_SQL_PASSWORD="" \
+    DOLT_REMOTE=${DOLT_REMOTE} \
     GOMEMLIMIT=1536MiB \
     GOGC=30 \
     WIDGETS_HOST=0.0.0.0 \
