@@ -17,11 +17,11 @@ services:
     ports:
       - "${WIDGETS_PORT:-8000}:8000"
     volumes:
-      # Defaults to a named volume — the container clones the DB from DoltHub on
-      # first start (or uses the baked-in copy) and persists it across restarts.
-      # Set DOLT_HOST_CLONE to a host path containing a .dolt dir to bind a local
-      # DoltHub clone instead.
-      - ${DOLT_HOST_CLONE:-sec_dolt_data}:/data/sec_company_facts
+      # One reusable named volume for the whole data dir. The container clones the
+      # DB from DoltHub into /data/sec_company_facts on first start and reuses it on
+      # every subsequent run — no re-download. To use an existing host clone
+      # instead, replace this line with:  - /abs/path/to/clone:/data/sec_company_facts
+      - sec_dolt_data:/data
     restart: unless-stopped
     deploy:
       resources:

@@ -63,11 +63,19 @@ ENV PYTHONPATH=/app \
     DOLT_SQL_USER=root \
     DOLT_SQL_PASSWORD="" \
     DOLT_REMOTE=${DOLT_REMOTE} \
+    DOLT_USER_NAME="sec-app container" \
+    DOLT_USER_EMAIL="sec-app@localhost" \
     GOMEMLIMIT=1536MiB \
     GOGC=30 \
     WIDGETS_HOST=0.0.0.0 \
     WIDGETS_PORT=8000 \
     WIDGETS_WORKERS=1
+
+# Dolt needs a commit identity to create the merge commit a `dolt pull` produces.
+# Bake a generic anonymous identity into the app user's global Dolt config so the
+# runtime pull/replication never depends on (or uses) a real user's identity.
+RUN dolt config --global --add user.name  "${DOLT_USER_NAME}" \
+    && dolt config --global --add user.email "${DOLT_USER_EMAIL}"
 
 EXPOSE 8000
 VOLUME ["/data"]

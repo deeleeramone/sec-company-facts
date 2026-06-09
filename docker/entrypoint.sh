@@ -8,6 +8,17 @@ DOLT_SQL_DB="${DOLT_SQL_DB:-sec_company_facts}"
 DOLT_REMOTE="${DOLT_REMOTE:-deeleeramone/sec-company-facts}"
 REPO_DIR="${DATA_DIR}/${DOLT_SQL_DB}"
 
+# Ensure Dolt has a commit identity for the merge commit a `dolt pull` creates.
+# Baked into the image's global config too; this re-asserts it at runtime so the
+# pull works even when the container runs as a different user/home. Generic and
+# anonymous by design — never a real user's identity.
+if ! dolt config --global --get user.name >/dev/null 2>&1; then
+    dolt config --global --add user.name  "${DOLT_USER_NAME:-sec-app container}" >/dev/null 2>&1 || true
+fi
+if ! dolt config --global --get user.email >/dev/null 2>&1; then
+    dolt config --global --add user.email "${DOLT_USER_EMAIL:-sec-app@localhost}" >/dev/null 2>&1 || true
+fi
+
 # Self-contained data bootstrap. The image may already carry a baked clone, a
 # named volume may persist a prior clone, or this may be a cold start with
 # nothing present — handle all three. The public DoltHub repo clones anonymously.
