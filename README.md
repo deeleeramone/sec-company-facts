@@ -43,6 +43,29 @@ volume. Override defaults via env vars: `WIDGETS_PORT`, `WIDGETS_IMAGE`,
 `DOLT_REMOTE`, `WIDGETS_MEMORY_LIMIT`, etc. To serve an existing host clone
 instead of cloning from DoltHub, see the comment in [docker-compose.yml](docker-compose.yml).
 
+## Clone size & memory (small cloud hosts)
+
+The first start downloads the DB, which can spike RAM on memory-constrained
+hosts. Two levers control this:
+
+- **`DOLT_CLONE_DEPTH`** (default `1`) — a **shallow clone**: only the latest
+  commit's data is downloaded, not full history. Far less to stream/buffer/index,
+  so peak RAM and clone time stay low. History operations (`dolt diff` across old
+  commits) won't work, which is irrelevant for serving. Set `DOLT_CLONE_DEPTH=`
+  (empty) for a full-history clone. Dolt exposes no download-concurrency/chunk
+  knob — depth is the way to shrink the transfer.
+- **`GOMEMLIMIT`** (default `1536MiB`) / **`GOGC`** (default `30`) — Go's soft
+  memory cap and GC aggressiveness, applied to the `dolt clone` process. Lower
+  `GOMEMLIMIT` (e.g. `1024MiB`) to force harder GC and stay under a tight RAM
+  ceiling — slower and more CPU, but it won't OOM. Keep it a few hundred MB below
+  the container's memory limit to leave headroom for uvicorn/python.
+
+```bash
+docker run -d -p 8000:8000 -v sec_dolt_data:/data \
+  -e DOLT_CLONE_DEPTH=1 -e GOMEMLIMIT=1024MiB \
+  ghcr.io/deeleeramone/sec-company-facts:latest
+```
+
 ## Staying up to date
 
 - **On start:** the entrypoint runs `dolt pull` so the served data is current.

@@ -6,6 +6,12 @@ DOLT_SQL_HOST="${DOLT_SQL_HOST:-127.0.0.1}"
 DOLT_SQL_PORT="${DOLT_SQL_PORT:-3306}"
 DOLT_SQL_DB="${DOLT_SQL_DB:-sec_company_facts}"
 DOLT_REMOTE="${DOLT_REMOTE:-deeleeramone/sec-company-facts}"
+# Shallow clone depth. A serving replica only needs current state, so depth 1
+# downloads just the latest commit's data — far less to stream/buffer/index,
+# which keeps peak RAM (and time) low on small cloud hosts. Set to empty for a
+# full-history clone. GOMEMLIMIT/GOGC (set in the image) additionally cap the Go
+# heap during the clone.
+DOLT_CLONE_DEPTH="${DOLT_CLONE_DEPTH:-1}"
 REPO_DIR="${DATA_DIR}/${DOLT_SQL_DB}"
 
 # Ensure Dolt has a commit identity for the merge commit a `dolt pull` creates.
@@ -23,9 +29,16 @@ fi
 # named volume may persist a prior clone, or this may be a cold start with
 # nothing present — handle all three. The public DoltHub repo clones anonymously.
 if [ ! -d "${REPO_DIR}/.dolt" ]; then
-    echo "[entrypoint] no Dolt repository at ${REPO_DIR}; cloning ${DOLT_REMOTE} ..."
+    DEPTH_ARGS=""
+    if [ -n "${DOLT_CLONE_DEPTH}" ]; then
+        DEPTH_ARGS="--depth ${DOLT_CLONE_DEPTH}"
+        echo "[entrypoint] cloning ${DOLT_REMOTE} (shallow, depth=${DOLT_CLONE_DEPTH}) ..."
+    else
+        echo "[entrypoint] cloning ${DOLT_REMOTE} (full history) ..."
+    fi
     mkdir -p "${DATA_DIR}"
-    if ! dolt clone "${DOLT_REMOTE}" "${REPO_DIR}"; then
+    # shellcheck disable=SC2086 -- DEPTH_ARGS is intentionally word-split (flag + value or empty)
+    if ! dolt clone ${DEPTH_ARGS} "${DOLT_REMOTE}" "${REPO_DIR}"; then
         echo "[entrypoint] FATAL: dolt clone of ${DOLT_REMOTE} failed" >&2
         exit 1
     fi
