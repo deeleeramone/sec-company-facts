@@ -1,16 +1,16 @@
 name: Publish container image
 
-# Manual only. The image bakes the Dolt database in as a fast-start baseline;
-# running containers self-update from DoltHub (startup pull + read replication),
-# so there is no nightly rebuild — re-baking the multi-GB DB every night would be
-# wasteful. Rebuild on demand when you want a fresher baked baseline.
+# Manual only. The published image is code-only (small, fast to pull). It does
+# NOT bake the Dolt database in — a multi-GB GHCR layer is slower to download
+# than cloning DoltHub directly. Instead the container clones the repo from
+# DoltHub on first start and stays fresh via read replication.
 on:
   workflow_dispatch:
     inputs:
       bake_data:
-        description: 'Clone the DoltHub DB into the image (large layer; uncheck for a code-only image)'
+        description: 'Bake the DoltHub DB into the image (NOT recommended — large, slow GHCR pull; data is fetched at runtime instead)'
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: publish-image
