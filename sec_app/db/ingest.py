@@ -43,43 +43,12 @@ def _connect(db_path: str | None = None):
     del db_path
     conn = connect_dolt()
     _OPEN_CONNECTIONS.add(conn)
-    global _SCHEMA_ENSURED
-    if not _SCHEMA_ENSURED:
-        _ensure_standardized_source_column(conn)
-        _SCHEMA_ENSURED = True
     return conn
 
 
 # Open connections not yet finalized; closed at each write entry point and as a
 # process-exit safety net.
 _OPEN_CONNECTIONS: set[Any] = set()
-
-# Set once per process after standardized_statements.source is verified/added.
-_SCHEMA_ENSURED = False
-
-
-def _ensure_standardized_source_column(conn) -> None:
-    """Idempotently ensure standardized_statements has the ``source`` column.
-
-    The provenance column was added after the table was first published, so a
-    clone of the existing DoltHub repo may predate it. Add it if missing before
-    any materialization writes ``source`` — otherwise the INSERT fails against
-    the older schema.
-    """
-    table = _table("standardized_statements")
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM information_schema.columns "
-            "WHERE table_schema = DATABASE() AND table_name = 'standardized_statements' "
-            "AND column_name = 'source'"
-        ).fetchone()
-    except Exception as exc:  # pylint: disable=broad-except
-        print(f"[schema] could not verify standardized_statements.source: {exc!r}", flush=True)
-        return
-    if row and int(row[0]) > 0:
-        return
-    print("[schema] adding missing standardized_statements.source column", flush=True)
-    conn.execute(f"ALTER TABLE {table} ADD COLUMN source VARCHAR(256)")
 
 
 def _finalize(conn) -> None:
@@ -316,7 +285,7 @@ def _iter_companyfacts_zip(
 
 def _statement_ciks(conn) -> set[str]:
     rows = conn.execute(
-        f"SELECT cik FROM {_table('processed_ciks')} WHERE has_balance OR has_income OR has_cash_flow"
+        f"SELECT cik FROM {_table('processed_ciks')} WHERE has_balance AND has_income AND has_cash_flow"
     ).fetchall()
     return {cik for (cik,) in rows}
 
@@ -392,27 +361,23 @@ _COMPANIES_SCHEMA = pa.schema(
     ]
 )
 
-_TAG_META_SCHEMA = pa.schema(
+_CIK_TAGS_SCHEMA = pa.schema(
     [
         ("cik", pa.string()),
-        ("namespace", pa.string()),
-        ("tag", pa.string()),
-        ("label", pa.string()),
-        ("description", pa.string()),
+        ("tag_id", pa.int32()),
     ]
 )
 
-_FACTS_SCHEMA = pa.schema(
+_FACTS_ENC_SCHEMA = pa.schema(
     [
         ("cik", pa.string()),
-        ("namespace", pa.string()),
-        ("tag", pa.string()),
+        ("tag_id", pa.int32()),
         ("unit", pa.string()),
         ("start", pa.date32()),
         ("end", pa.date32()),
         ("val", pa.float64()),
         ("val_text", pa.string()),
-        ("accn", pa.string()),
+        ("accn_id", pa.int32()),
         ("fy", pa.int32()),
         ("fp", pa.string()),
         ("form", pa.string()),
@@ -439,7 +404,7 @@ _PROCESSED_SCHEMA = pa.schema(
     ]
 )
 
-_STANDARDIZED_SCHEMA = pa.schema(
+_STANDARDIZED_ENC_SCHEMA = pa.schema(
     [
         ("cik", pa.string()),
         ("statement", pa.string()),
@@ -450,16 +415,10 @@ _STANDARDIZED_SCHEMA = pa.schema(
         ("calendar_period", pa.string()),
         ("frequency", pa.string()),
         ("tag", pa.string()),
-        ("label", pa.string()),
-        ("parent", pa.string()),
-        ("sequence", pa.int32()),
-        ("factor", pa.string()),
-        ("balance", pa.string()),
-        ("unit", pa.string()),
         ("val", pa.float64()),
         ("currency", pa.string()),
         ("company_type", pa.string()),
-        ("source", pa.string()),
+        ("source_id", pa.int32()),
     ]
 )
 
@@ -496,6 +455,156 @@ _MULTI_CIK_SCHEMA = pa.schema(
         ("priority", pa.int32()),
     ]
 )
+
+
+# --------------------------------------------------------------------------- #
+# Dictionary-encoding helpers
+#
+# The big tables store repeated strings as INT ids into dim tables
+# (xbrl_tags, accessions, sources, std_presentation). Row builders keep
+# producing the full human-readable dicts; these helpers translate them into
+# encoded rows at the insert sites. Caches are per-process: dim ids are
+# immutable once created, and every rollback path in this module re-raises,
+# so a poisoned cache entry can never outlive the failed run.
+# --------------------------------------------------------------------------- #
+
+_TAG_ID_CACHE: dict[tuple[str, str], int] = {}
+_ACCN_ID_CACHE: dict[str, int] = {}
+_SOURCE_ID_CACHE: dict[str, int] = {}
+_STD_PRES_SEEN: set[tuple[str, str, str]] = set()
+
+
+def _dim_id(conn, cache: dict, key, select_sql: str, select_params: list, insert_sql: str, insert_params: list) -> int:
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    row = conn.execute(select_sql, select_params).fetchone()
+    if row is None:
+        conn.execute(insert_sql, insert_params)
+        row = conn.execute(select_sql, select_params).fetchone()
+    val = int(row[0])
+    cache[key] = val
+    return val
+
+
+def _tag_id(conn, namespace: str, tag: str, label: str | None = None, description: str | None = None) -> int:
+    t = _table("xbrl_tags")
+    return _dim_id(
+        conn,
+        _TAG_ID_CACHE,
+        (namespace, tag),
+        f"SELECT tag_id FROM {t} WHERE namespace = ? AND tag = ?",
+        [namespace, tag],
+        f"INSERT INTO {t} (namespace, tag, label, description) VALUES (?, ?, ?, ?)",
+        [namespace, tag, label, description],
+    )
+
+
+def _accn_id(conn, accn: str) -> int:
+    t = _table("accessions")
+    return _dim_id(
+        conn,
+        _ACCN_ID_CACHE,
+        accn,
+        f"SELECT accn_id FROM {t} WHERE accn = ?",
+        [accn],
+        f"INSERT INTO {t} (accn) VALUES (?)",
+        [accn],
+    )
+
+
+def _source_id(conn, source: str) -> int:
+    t = _table("sources")
+    return _dim_id(
+        conn,
+        _SOURCE_ID_CACHE,
+        source,
+        f"SELECT source_id FROM {t} WHERE source = ?",
+        [source],
+        f"INSERT INTO {t} (source) VALUES (?)",
+        [source],
+    )
+
+
+def _encode_fact_rows(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        accn = r.get("accn")
+        out.append(
+            {
+                "cik": r["cik"],
+                "tag_id": _tag_id(conn, r["namespace"], r["tag"]),
+                "unit": r.get("unit"),
+                "start": r.get("start"),
+                "end": r.get("end"),
+                "val": r.get("val"),
+                "val_text": r.get("val_text"),
+                "accn_id": _accn_id(conn, accn) if accn else None,
+                "fy": r.get("fy"),
+                "fp": r.get("fp"),
+                "form": r.get("form"),
+                "filed": r.get("filed"),
+                "frame": r.get("frame"),
+            }
+        )
+    return out
+
+
+def _encode_tag_meta_rows(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for r in rows:
+        tid = _tag_id(conn, r["namespace"], r["tag"], r.get("label"), r.get("description"))
+        key = (r["cik"], tid)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"cik": r["cik"], "tag_id": tid})
+    return out
+
+
+def _encode_std_rows(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pres = _table("std_presentation")
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        pres_key = (r["company_type"], r["statement"], r["tag"])
+        if pres_key not in _STD_PRES_SEEN:
+            conn.execute(
+                f"INSERT INTO {pres} (company_type, statement, tag, label, parent, sequence, factor, balance, unit) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON DUPLICATE KEY UPDATE label = VALUES(label), parent = VALUES(parent), "
+                "sequence = VALUES(sequence), factor = VALUES(factor), balance = VALUES(balance), unit = VALUES(unit)",
+                [
+                    r["company_type"],
+                    r["statement"],
+                    r["tag"],
+                    r.get("label"),
+                    r.get("parent"),
+                    r.get("sequence"),
+                    r.get("factor"),
+                    r.get("balance"),
+                    r.get("unit"),
+                ],
+            )
+            _STD_PRES_SEEN.add(pres_key)
+        out.append(
+            {
+                "cik": r["cik"],
+                "statement": r["statement"],
+                "period_ending": r["period_ending"],
+                "fiscal_year": r["fiscal_year"],
+                "fiscal_period": r["fiscal_period"],
+                "calendar_year": r["calendar_year"],
+                "calendar_period": r["calendar_period"],
+                "frequency": r["frequency"],
+                "tag": r["tag"],
+                "val": r["val"],
+                "currency": r["currency"],
+                "company_type": r["company_type"],
+                "source_id": _source_id(conn, r["source"]),
+            }
+        )
+    return out
 
 
 def ingest_companyfacts_zip(
@@ -543,7 +652,9 @@ def ingest_companyfacts_zip(
             if err:
                 print(f"[facts] cik={cik_done} standardized resolve FAILED: {err}", flush=True)
             if rows:
-                _insert_arrow(conn, _table("standardized_statements"), rows, _STANDARDIZED_SCHEMA)
+                _insert_arrow(
+                    conn, _table("standardized_statements_enc"), _encode_std_rows(conn, rows), _STANDARDIZED_ENC_SCHEMA
+                )
             rows_total += len(rows)
             stats["standardized"] += len(rows)
         print(f"[standardized] batch done companies={n} rows={rows_total:,}", flush=True)
@@ -576,9 +687,9 @@ def ingest_companyfacts_zip(
         # the DELETEs would be pure full-table scans over the large tables — skip.
         if prev_hash is not None:
             conn.execute(f"DELETE FROM {_table('companies')} WHERE cik = ?", [cik_norm])
-            conn.execute(f"DELETE FROM {_table('tag_meta')} WHERE cik = ?", [cik_norm])
-            conn.execute(f"DELETE FROM {_table('facts')} WHERE cik = ?", [cik_norm])
-            conn.execute(f"DELETE FROM {_table('standardized_statements')} WHERE cik = ?", [cik_norm])
+            conn.execute(f"DELETE FROM {_table('cik_tags')} WHERE cik = ?", [cik_norm])
+            conn.execute(f"DELETE FROM {_table('facts_enc')} WHERE cik = ?", [cik_norm])
+            conn.execute(f"DELETE FROM {_table('standardized_statements_enc')} WHERE cik = ?", [cik_norm])
 
         companies: list[dict[str, Any]] = [
             {
@@ -653,8 +764,8 @@ def ingest_companyfacts_zip(
             flush=True,
         )
         _insert_arrow(conn, _table("companies"), companies, _COMPANIES_SCHEMA)
-        _insert_arrow(conn, _table("tag_meta"), tag_meta, _TAG_META_SCHEMA)
-        _insert_arrow(conn, _table("facts"), facts, _FACTS_SCHEMA)
+        _insert_arrow(conn, _table("cik_tags"), _encode_tag_meta_rows(conn, tag_meta), _CIK_TAGS_SCHEMA)
+        _insert_arrow(conn, _table("facts_enc"), _encode_fact_rows(conn, facts), _FACTS_ENC_SCHEMA)
 
         # Materialize standardized statements in the SAME pass (single-pass design),
         # resolving from the in-memory payload — no second read of the DB. ONLY for
@@ -793,14 +904,15 @@ def compute_processed_ciks(
             conn.execute(f"DELETE FROM {_table('processed_ciks')}")
             source_sql = f"""
                 SELECT
-                    tm.cik,
+                    ct.cik,
                     MAX(CASE WHEN m.stmt = 'balance_sheet' THEN 1 ELSE 0 END) AS has_balance,
                     MAX(CASE WHEN m.stmt = 'income_statement' THEN 1 ELSE 0 END) AS has_income,
                     MAX(CASE WHEN m.stmt = 'cash_flow' THEN 1 ELSE 0 END) AS has_cash_flow
-                FROM {_table("tag_meta")} tm
-                JOIN _stmt_tag_map m ON m.tag = tm.tag
-                WHERE tm.namespace IN ('us-gaap', 'ifrs-full')
-                GROUP BY tm.cik
+                FROM {_table("cik_tags")} ct
+                JOIN {_table("xbrl_tags")} x ON x.tag_id = ct.tag_id
+                JOIN _stmt_tag_map m ON m.tag = x.tag
+                WHERE x.namespace IN ('us-gaap', 'ifrs-full')
+                GROUP BY ct.cik
             """
         else:
             target_rows = [{"cik": cik} for cik in sorted(only_ciks)]
@@ -809,15 +921,16 @@ def compute_processed_ciks(
             conn.execute(f"DELETE FROM {_table('processed_ciks')} WHERE cik IN (SELECT cik FROM _target_ciks)")
             source_sql = f"""
                 SELECT
-                    tm.cik,
+                    ct.cik,
                     MAX(CASE WHEN m.stmt = 'balance_sheet' THEN 1 ELSE 0 END) AS has_balance,
                     MAX(CASE WHEN m.stmt = 'income_statement' THEN 1 ELSE 0 END) AS has_income,
                     MAX(CASE WHEN m.stmt = 'cash_flow' THEN 1 ELSE 0 END) AS has_cash_flow
-                FROM {_table("tag_meta")} tm
-                JOIN _target_ciks t ON t.cik = tm.cik
-                JOIN _stmt_tag_map m ON m.tag = tm.tag
-                WHERE tm.namespace IN ('us-gaap', 'ifrs-full')
-                GROUP BY tm.cik
+                FROM {_table("cik_tags")} ct
+                JOIN _target_ciks t ON t.cik = ct.cik
+                JOIN {_table("xbrl_tags")} x ON x.tag_id = ct.tag_id
+                JOIN _stmt_tag_map m ON m.tag = x.tag
+                WHERE x.namespace IN ('us-gaap', 'ifrs-full')
+                GROUP BY ct.cik
             """
 
         now = datetime.now().replace(microsecond=0)
@@ -826,7 +939,9 @@ def compute_processed_ciks(
             INSERT INTO {_table("processed_ciks")} (cik, has_balance, has_income, has_cash_flow, computed_at)
             SELECT cik, has_balance = 1, has_income = 1, has_cash_flow = 1, ?
             FROM ({source_sql}) q
-            WHERE has_balance = 1 OR has_income = 1 OR has_cash_flow = 1
+            -- Only companies with ALL THREE statements are "processed"; a company
+            -- missing any of balance/income/cash-flow is excluded entirely.
+            WHERE has_balance = 1 AND has_income = 1 AND has_cash_flow = 1
             """,
             [now],
         )
@@ -879,7 +994,7 @@ def ingest_submissions_zip(
 
     if cik_filter is None:
         rows = conn.execute(
-            f"SELECT cik FROM {_table('processed_ciks')} WHERE has_balance OR has_income OR has_cash_flow"
+            f"SELECT cik FROM {_table('processed_ciks')} WHERE has_balance AND has_income AND has_cash_flow"
         ).fetchall()
         cik_filter = {row[0] for row in rows}
 
@@ -921,8 +1036,16 @@ def ingest_submissions_zip(
         print(f"[submissions] cik={cik} changed hash={payload_hash[:12]} mtime={mtime.isoformat()}", flush=True)
         print(f"[submissions] cik={cik} deleting existing dei/submission rows", flush=True)
         conn.execute(f"DELETE FROM {_table('submissions')} WHERE cik = ?", [cik])
-        conn.execute(f"DELETE FROM {_table('facts')} WHERE cik = ? AND namespace = 'dei'", [cik])
-        conn.execute(f"DELETE FROM {_table('tag_meta')} WHERE cik = ? AND namespace = 'dei'", [cik])
+        conn.execute(
+            f"DELETE FROM {_table('facts_enc')} WHERE cik = ? AND tag_id IN "
+            f"(SELECT tag_id FROM {_table('xbrl_tags')} WHERE namespace = 'dei')",
+            [cik],
+        )
+        conn.execute(
+            f"DELETE FROM {_table('cik_tags')} WHERE cik = ? AND tag_id IN "
+            f"(SELECT tag_id FROM {_table('xbrl_tags')} WHERE namespace = 'dei')",
+            [cik],
+        )
 
         submissions: list[dict[str, Any]] = [{"cik": cik, "payload": payload_bytes, "source_mtime": mtime}]
         tag_meta: list[dict[str, Any]] = []
@@ -982,8 +1105,8 @@ def ingest_submissions_zip(
             )
 
         _insert_arrow(conn, _table("submissions"), submissions, _SUBMISSIONS_SCHEMA)
-        _insert_arrow(conn, _table("tag_meta"), tag_meta, _TAG_META_SCHEMA)
-        _insert_arrow(conn, _table("facts"), facts, _FACTS_SCHEMA)
+        _insert_arrow(conn, _table("cik_tags"), _encode_tag_meta_rows(conn, tag_meta), _CIK_TAGS_SCHEMA)
+        _insert_arrow(conn, _table("facts_enc"), _encode_fact_rows(conn, facts), _FACTS_ENC_SCHEMA)
         print(
             f"[submissions] cik={cik} inserted submissions={len(submissions)} tag_meta={len(tag_meta)} dei_facts={len(facts)}",
             flush=True,
@@ -1023,11 +1146,18 @@ def _load_company_facts_from_conn(conn, cik: str) -> dict[str, Any]:
             print(f"[standardized] cik={cik_padded} load facts missing company row", flush=True)
         raise ValueError(f"CIK {cik_padded} not found")
     meta_rows = conn.execute(
-        f"SELECT namespace, tag, label, description FROM {_table('tag_meta')} WHERE cik = ?", [cik_padded]
+        f"SELECT x.namespace, x.tag, x.label, x.description "
+        f"FROM {_table('cik_tags')} ct JOIN {_table('xbrl_tags')} x ON x.tag_id = ct.tag_id "
+        f"WHERE ct.cik = ?",
+        [cik_padded],
     ).fetchall()
     fact_rows = conn.execute(
-        f'SELECT namespace, tag, unit, start, "end", val, val_text, accn, fy, fp, form, filed, frame '
-        f'FROM {_table("facts")} WHERE cik = ? ORDER BY namespace, tag, unit, "end", filed',
+        f"SELECT x.namespace, x.tag, f.unit, f.`start`, f.`end`, f.val, f.val_text, a.accn, "
+        f"f.fy, f.fp, f.form, f.filed, f.frame "
+        f"FROM {_table('facts_enc')} f "
+        f"JOIN {_table('xbrl_tags')} x ON x.tag_id = f.tag_id "
+        f"LEFT JOIN {_table('accessions')} a ON a.accn_id = f.accn_id "
+        f"WHERE f.cik = ? ORDER BY x.namespace, x.tag, f.unit, f.`end`, f.filed",
         [cik_padded],
     ).fetchall()
     if verbose:
@@ -1166,7 +1296,7 @@ def materialize_standardized_statements(
                 c
                 for (c,) in conn.execute(
                     f"SELECT cik FROM {_table('processed_ciks')} "
-                    "WHERE has_balance OR has_income OR has_cash_flow ORDER BY cik"
+                    "WHERE has_balance AND has_income AND has_cash_flow ORDER BY cik"
                 ).fetchall()
             ]
         elif not only_ciks:
@@ -1191,7 +1321,13 @@ def materialize_standardized_statements(
 
             try:
                 conn.begin()
-                _delete_and_insert_rows(conn, _table("standardized_statements"), cik, rows, _STANDARDIZED_SCHEMA)
+                _delete_and_insert_rows(
+                    conn,
+                    _table("standardized_statements_enc"),
+                    cik,
+                    _encode_std_rows(conn, rows),
+                    _STANDARDIZED_ENC_SCHEMA,
+                )
                 conn.commit()
             except Exception as e_insert:
                 conn.rollback()
@@ -1515,11 +1651,19 @@ def run_update(
                     print(f"[update:subs] cik={cik} tx begin", flush=True)
                     conn.begin()
                     conn.execute(f"DELETE FROM {_table('submissions')} WHERE cik = ?", [cik])
-                    conn.execute(f"DELETE FROM {_table('facts')} WHERE cik = ? AND namespace = 'dei'", [cik])
-                    conn.execute(f"DELETE FROM {_table('tag_meta')} WHERE cik = ? AND namespace = 'dei'", [cik])
+                    conn.execute(
+                        f"DELETE FROM {_table('facts_enc')} WHERE cik = ? AND tag_id IN "
+                        f"(SELECT tag_id FROM {_table('xbrl_tags')} WHERE namespace = 'dei')",
+                        [cik],
+                    )
+                    conn.execute(
+                        f"DELETE FROM {_table('cik_tags')} WHERE cik = ? AND tag_id IN "
+                        f"(SELECT tag_id FROM {_table('xbrl_tags')} WHERE namespace = 'dei')",
+                        [cik],
+                    )
                     _insert_arrow(conn, _table("submissions"), submissions, _SUBMISSIONS_SCHEMA)
-                    _insert_arrow(conn, _table("tag_meta"), tag_meta, _TAG_META_SCHEMA)
-                    _insert_arrow(conn, _table("facts"), facts, _FACTS_SCHEMA)
+                    _insert_arrow(conn, _table("cik_tags"), _encode_tag_meta_rows(conn, tag_meta), _CIK_TAGS_SCHEMA)
+                    _insert_arrow(conn, _table("facts_enc"), _encode_fact_rows(conn, facts), _FACTS_ENC_SCHEMA)
                     conn.commit()
                     print(
                         f"[update:subs] cik={cik} tx commit submissions={len(submissions):,} tag_meta={len(tag_meta):,} dei_facts={len(facts):,}",
@@ -1638,11 +1782,11 @@ def run_update(
         try:
             conn.begin()
             conn.execute(f"DELETE FROM {_table('companies')} WHERE cik = ?", [cik_norm])
-            conn.execute(f"DELETE FROM {_table('tag_meta')} WHERE cik = ?", [cik_norm])
-            conn.execute(f"DELETE FROM {_table('facts')} WHERE cik = ?", [cik_norm])
+            conn.execute(f"DELETE FROM {_table('cik_tags')} WHERE cik = ?", [cik_norm])
+            conn.execute(f"DELETE FROM {_table('facts_enc')} WHERE cik = ?", [cik_norm])
             _insert_arrow(conn, _table("companies"), companies, _COMPANIES_SCHEMA)
-            _insert_arrow(conn, _table("tag_meta"), tag_meta, _TAG_META_SCHEMA)
-            _insert_arrow(conn, _table("facts"), facts, _FACTS_SCHEMA)
+            _insert_arrow(conn, _table("cik_tags"), _encode_tag_meta_rows(conn, tag_meta), _CIK_TAGS_SCHEMA)
+            _insert_arrow(conn, _table("facts_enc"), _encode_fact_rows(conn, facts), _FACTS_ENC_SCHEMA)
             conn.commit()
         except Exception as e_fact_apply:
             conn.rollback()

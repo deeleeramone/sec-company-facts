@@ -39,7 +39,7 @@ def _log_sql_done(rowcount: int, elapsed_s: float) -> None:
 # Tables whose Dolt schema carries a surrogate ``id BIGINT`` PK. ``DoltConn``
 # allocates ids above the current high-water mark so unchanged rows keep their
 # ids (and never produce a spurious diff) across runs.
-DOLT_ID_TABLES = frozenset({"facts", "entities"})
+DOLT_ID_TABLES = frozenset({"facts", "facts_enc", "entities"})
 
 
 # --------------------------------------------------------------------------- #

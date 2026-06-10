@@ -5,6 +5,7 @@
     "category": "Financial Statements",
     "type": "table",
     "endpoint": "balance_sheet",
+    "refetchInterval": false,
     "gridData": {
       "w": 40,
       "h": 18
@@ -126,6 +127,7 @@
     "category": "Financial Statements",
     "type": "table",
     "endpoint": "income_statement",
+    "refetchInterval": false,
     "gridData": {
       "w": 40,
       "h": 18
@@ -247,6 +249,7 @@
     "category": "Financial Statements",
     "type": "table",
     "endpoint": "cash_flow",
+    "refetchInterval": false,
     "gridData": {
       "w": 40,
       "h": 18

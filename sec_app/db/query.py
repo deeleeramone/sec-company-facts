@@ -90,14 +90,20 @@ def load_company_facts(
             raise OpenBBError(f"CIK {cik_padded} not found in the SEC database.")
         meta_rows = _rows(
             sess,
-            f"SELECT namespace, tag, label, description FROM {DATABASE_NAME}.tag_meta WHERE cik = {_q(cik_padded)}",
+            f"SELECT x.namespace, x.tag, x.label, x.description "
+            f"FROM {DATABASE_NAME}.cik_tags ct "
+            f"JOIN {DATABASE_NAME}.xbrl_tags x ON x.tag_id = ct.tag_id "
+            f"WHERE ct.cik = {_q(cik_padded)}",
         )
         fact_rows = _rows(
             sess,
-            f'SELECT namespace, tag, unit, start, "end", val, val_text, '
-            f"accn, fy, fp, form, filed, frame "
-            f"FROM {DATABASE_NAME}.facts WHERE cik = {_q(cik_padded)} "
-            f'ORDER BY namespace, tag, unit, "end", filed',
+            f"SELECT x.namespace, x.tag, f.unit, f.`start`, f.`end`, f.val, f.val_text, "
+            f"a.accn, f.fy, f.fp, f.form, f.filed, f.frame "
+            f"FROM {DATABASE_NAME}.facts_enc f "
+            f"JOIN {DATABASE_NAME}.xbrl_tags x ON x.tag_id = f.tag_id "
+            f"LEFT JOIN {DATABASE_NAME}.accessions a ON a.accn_id = f.accn_id "
+            f"WHERE f.cik = {_q(cik_padded)} "
+            f"ORDER BY x.namespace, x.tag, f.unit, f.`end`, f.filed",
         )
     finally:
         sess.close()
@@ -162,23 +168,16 @@ def load_standardized_statements(
     if period not in ("annual", "quarterly") or not cik_list:
         return None
     sess = _session(db_path)
-    base_cols = "statement, period_ending, fiscal_year, fiscal_period, currency, tag, val, company_type"
+    base_cols = "s.statement, s.period_ending, s.fiscal_year, s.fiscal_period, s.currency, s.tag, s.val, s.company_type"
     try:
         ciks_in = "(" + ",".join(_q(c) for c in cik_list) + ")"
-        where = f"WHERE cik IN {ciks_in} AND frequency = {_q(period)}"
-        try:
-            rows = _rows(
-                sess,
-                f"SELECT {base_cols}, source FROM {DATABASE_NAME}.standardized_statements {where}",
-            )
-            has_source = True
-        except Exception:
-            # `source` column not present yet (pre-provenance materialization).
-            rows = _rows(
-                sess,
-                f"SELECT {base_cols} FROM {DATABASE_NAME}.standardized_statements {where}",
-            )
-            has_source = False
+        where = f"WHERE s.cik IN {ciks_in} AND s.frequency = {_q(period)}"
+        rows = _rows(
+            sess,
+            f"SELECT {base_cols}, src.source "
+            f"FROM {DATABASE_NAME}.standardized_statements_enc s "
+            f"JOIN {DATABASE_NAME}.sources src ON src.source_id = s.source_id {where}",
+        )
         name_row = _row(
             sess,
             f"SELECT entity_name FROM {DATABASE_NAME}.companies WHERE cik = {_q(cik_list[0])} LIMIT 1",
@@ -216,7 +215,7 @@ def load_standardized_statements(
                 "currency": currency,
                 "tag": tag,
                 "value": val,
-                "source": (row[8] if has_source and len(row) > 8 else "") or "",
+                "source": (row[8] if len(row) > 8 else "") or "",
                 "label": rd.label if rd else tag,
                 "description": rd.description if rd else "",
                 "parent": rd.parent if rd else None,
@@ -249,7 +248,7 @@ def list_companies_with_financials(
               FROM {DATABASE_NAME}.companies c
               JOIN {DATABASE_NAME}.tickers t ON t.cik = c.cik
               JOIN {DATABASE_NAME}.processed_ciks p ON p.cik = c.cik
-             WHERE p.has_balance OR p.has_income OR p.has_cash_flow
+             WHERE p.has_balance AND p.has_income AND p.has_cash_flow
              GROUP BY c.cik
              ORDER BY ticker
             """,
@@ -284,10 +283,11 @@ def list_company_choices(
             WITH sic AS (
                 SELECT cik, val_text AS sic_name
                   FROM (
-                    SELECT cik, val_text,
-                           row_number() OVER (PARTITION BY cik ORDER BY "end" DESC) AS rn
-                      FROM {DATABASE_NAME}.facts
-                     WHERE namespace='dei' AND tag='EntitySicDescription'
+                    SELECT f.cik, f.val_text,
+                           row_number() OVER (PARTITION BY f.cik ORDER BY f.`end` DESC) AS rn
+                      FROM {DATABASE_NAME}.facts_enc f
+                      JOIN {DATABASE_NAME}.xbrl_tags x ON x.tag_id = f.tag_id
+                     WHERE x.namespace='dei' AND x.tag='EntitySicDescription'
                   ) AS s
                  WHERE rn = 1
             )
@@ -301,7 +301,7 @@ def list_company_choices(
                 JOIN {DATABASE_NAME}.tickers          t  ON t.cik  = pt.cik AND t.ticker = pt.ticker
               JOIN {DATABASE_NAME}.processed_ciks   p  ON p.cik  = pt.cik
               LEFT JOIN sic                            ON sic.cik = pt.cik
-             WHERE p.has_balance OR p.has_income OR p.has_cash_flow
+             WHERE p.has_balance AND p.has_income AND p.has_cash_flow
                GROUP BY pt.ticker, c.entity_name, pt.cik, sic.sic_name
                ORDER BY `rank` ASC, ticker ASC
             """,
@@ -877,15 +877,16 @@ def company_profile(
         dei_rows = _rows(
             sess,
             f"""
-            SELECT tag, val, val_text, "end"
+            SELECT tag, val, val_text, `end`
               FROM (
-                SELECT tag, val, val_text, "end",
+                SELECT x.tag, f.val, f.val_text, f.`end`,
                        row_number() OVER (
-                           PARTITION BY tag ORDER BY "end" DESC, filed DESC
+                           PARTITION BY x.tag ORDER BY f.`end` DESC, f.filed DESC
                        ) AS rn
-                  FROM {DATABASE_NAME}.facts
-                 WHERE cik IN {ciks_in}
-                   AND namespace='dei' AND tag IN {tag_in}
+                  FROM {DATABASE_NAME}.facts_enc f
+                  JOIN {DATABASE_NAME}.xbrl_tags x ON x.tag_id = f.tag_id
+                 WHERE f.cik IN {ciks_in}
+                   AND x.namespace='dei' AND x.tag IN {tag_in}
               ) AS r
              WHERE rn = 1
             """,
@@ -897,7 +898,7 @@ def company_profile(
             sess,
             f"""
             SELECT min(period_ending), max(period_ending)
-              FROM {DATABASE_NAME}.standardized_statements
+              FROM {DATABASE_NAME}.standardized_statements_enc
              WHERE cik IN {ciks_in}
             """,
         )
@@ -1019,7 +1020,7 @@ def _latest_standardized_period(
     )
     row = _row(
         sess,
-        f"SELECT max(s.period_ending) FROM {DATABASE_NAME}.standardized_statements s WHERE {where_sql}",
+        f"SELECT max(s.period_ending) FROM {DATABASE_NAME}.standardized_statements_enc s WHERE {where_sql}",
     )
     if not row or row[0] is None:
         return None
@@ -1051,9 +1052,7 @@ def top_companies_by_metric(
         where_sql += " AND s.period_ending >= CURRENT_DATE - INTERVAL 1 YEAR"
         sign = "-1.0" if negate else "1.0"
         negate_filter = " AND l.val < 0" if negate else ""
-        financial_filter = (
-            " AND l.company_type NOT IN ('financial', 'insurance')" if exclude_financial_template else ""
-        )
+        financial_filter = " AND l.company_type NOT IN ('financial', 'insurance')" if exclude_financial_template else ""
         rows = _rows(
             sess,
             f"""
@@ -1064,7 +1063,7 @@ def top_companies_by_metric(
                     row_number() OVER (
                         PARTITION BY s.cik ORDER BY s.period_ending DESC
                     ) AS rn
-                FROM {DATABASE_NAME}.standardized_statements s
+                FROM {DATABASE_NAME}.standardized_statements_enc s
                 WHERE {where_sql}
             )
             , pairs AS (
@@ -1154,7 +1153,7 @@ def top_companies_by_sum(
                         PARTITION BY s.cik, s.period_ending
                         ORDER BY s.cik DESC
                     ) AS rn
-                FROM {DATABASE_NAME}.standardized_statements s                WHERE {where_a}
+                FROM {DATABASE_NAME}.standardized_statements_enc s                WHERE {where_a}
             )
             , b_ranked AS (
                 SELECT
@@ -1164,7 +1163,7 @@ def top_companies_by_sum(
                         PARTITION BY s.cik, s.period_ending
                         ORDER BY s.cik DESC
                     ) AS rn
-                FROM {DATABASE_NAME}.standardized_statements s                WHERE {where_b}
+                FROM {DATABASE_NAME}.standardized_statements_enc s                WHERE {where_b}
             )
             , summed AS (
                 SELECT
@@ -1283,7 +1282,7 @@ def top_companies_by_ratio(
                         PARTITION BY s.cik, s.period_ending
                         ORDER BY s.cik DESC
                     ) AS rn
-                FROM {DATABASE_NAME}.standardized_statements s                WHERE {num_where}{financial_filter_sql}
+                FROM {DATABASE_NAME}.standardized_statements_enc s                WHERE {num_where}{financial_filter_sql}
             )
             , denom_ranked AS (
                 SELECT
@@ -1293,7 +1292,7 @@ def top_companies_by_ratio(
                         PARTITION BY s.cik, s.period_ending
                         ORDER BY s.cik DESC
                     ) AS rn
-                FROM {DATABASE_NAME}.standardized_statements s                WHERE {denom_where}
+                FROM {DATABASE_NAME}.standardized_statements_enc s                WHERE {denom_where}
             )
             , paired AS (
                 SELECT

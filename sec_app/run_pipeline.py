@@ -40,9 +40,9 @@ def _derived_counts(db_path: str | None = None) -> tuple[int, int]:
     conn = _connect(db_path)
     try:
         processed_row = conn.execute(
-            f"SELECT COUNT(*) FROM {_table('processed_ciks')} WHERE has_balance OR has_income OR has_cash_flow"
+            f"SELECT COUNT(*) FROM {_table('processed_ciks')} WHERE has_balance AND has_income AND has_cash_flow"
         ).fetchone()
-        standardized_row = conn.execute(f"SELECT COUNT(*) FROM {_table('standardized_statements')}").fetchone()
+        standardized_row = conn.execute(f"SELECT COUNT(*) FROM {_table('standardized_statements_enc')}").fetchone()
     finally:
         _finalize(conn)
     processed_any = int(processed_row[0]) if processed_row else 0
