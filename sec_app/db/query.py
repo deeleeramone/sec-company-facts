@@ -1099,7 +1099,7 @@ def top_companies_by_metric(
             SELECT
                 pt.ticker AS ticker,
                 COALESCE(c.entity_name, '') AS name,
-                CAST(t.period_ending AS CHAR) AS period_ending,
+                DATE_FORMAT(t.period_ending, '%Y-%m-%d') AS period_ending,
                 t.fiscal_year, t.fiscal_period, t.currency, t.value_usd
             FROM scored t
             JOIN {DATABASE_NAME}.companies c ON c.cik = t.canonical_cik
@@ -1216,7 +1216,7 @@ def top_companies_by_sum(
             SELECT
                 pt.ticker AS ticker,
                 COALESCE(c.entity_name, '') AS name,
-                CAST(t.period_ending AS CHAR) AS period_ending,
+                DATE_FORMAT(t.period_ending, '%Y-%m-%d') AS period_ending,
                 t.fiscal_year, t.fiscal_period, t.currency, t.value_usd
             FROM scored t
             JOIN {DATABASE_NAME}.companies c ON c.cik = t.canonical_cik
@@ -1324,7 +1324,7 @@ def top_companies_by_ratio(
             SELECT
                 pt.ticker AS ticker,
                 COALESCE(c.entity_name, '') AS name,
-                CAST(t.period_ending AS CHAR) AS period_ending,
+                DATE_FORMAT(t.period_ending, '%Y-%m-%d') AS period_ending,
                 t.fiscal_year, t.fiscal_period, t.value
             FROM scored t
             JOIN {DATABASE_NAME}.companies c ON c.cik = t.canonical_cik
