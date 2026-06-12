@@ -784,13 +784,6 @@ def _decode_country(code: str | None) -> str | None:
     return SEC_LOCATION_CODES.get(code)
 
 
-def _decode_sic(code: str | None) -> str | None:
-    """SIC descriptions live in the dei facts already (EntitySicDescription).
-    Provided here as a stub so callers have one decode entry-point per code
-    type; falls through to None if not pre-supplied."""
-    return None  # company_profile already pulls EntitySicDescription
-
-
 def company_profile(
     cik_or_ticker: str,
     db_path: str | None = None,
