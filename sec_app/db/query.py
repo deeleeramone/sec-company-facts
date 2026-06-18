@@ -1027,6 +1027,7 @@ def top_companies_by_metric(
     exclude_financial_template: bool = True,
     frequency: str | None = "annual",
     negate: bool = False,
+    cik_filter: str | None = None,
     db_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """Top N companies by a standardized line item.
@@ -1043,6 +1044,8 @@ def top_companies_by_metric(
             frequency=frequency,
         )
         where_sql += " AND s.period_ending >= CURRENT_DATE - INTERVAL 1 YEAR"
+        if cik_filter:
+            where_sql += f" AND s.cik IN ({cik_filter})"
         sign = "-1.0" if negate else "1.0"
         negate_filter = " AND l.val < 0" if negate else ""
         financial_filter = " AND l.company_type NOT IN ('financial', 'insurance')" if exclude_financial_template else ""
@@ -1123,6 +1126,7 @@ def top_companies_by_sum(
     tag_b: str,
     limit: int = 25,
     exclude_financial_template: bool = True,
+    cik_filter: str | None = None,
     db_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """Rank companies by the sum of two tags (e.g. FCF = OCF + capex where capex is negative)."""
@@ -1132,6 +1136,10 @@ def top_companies_by_sum(
     _recent = " AND s.period_ending >= CURRENT_DATE - INTERVAL 1 YEAR"
     where_a += _recent
     where_b += _recent
+    if cik_filter:
+        _cf = f" AND s.cik IN ({cik_filter})"
+        where_a += _cf
+        where_b += _cf
     try:
         rows = _rows(
             sess,
@@ -1244,6 +1252,7 @@ def top_companies_by_ratio(
     min_denominator: float | None = None,
     denominator_statement: str | None = None,
     exclude_financial_template: bool = True,
+    cik_filter: str | None = None,
     db_path: str | None = None,
 ) -> list[dict[str, Any]]:
     sess = _session(db_path)
@@ -1253,6 +1262,8 @@ def top_companies_by_ratio(
     _recent = " AND s.period_ending >= CURRENT_DATE - INTERVAL 1 YEAR"
     num_where += _recent
     denom_where += _recent
+    if cik_filter:
+        num_where += f" AND s.cik IN ({cik_filter})"
     bounds: list[str] = []
     if min_value is not None:
         bounds.append(f"value >= {float(min_value)}")

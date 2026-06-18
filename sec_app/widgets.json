@@ -435,6 +435,99 @@
         "label": "Top N",
         "value": 25,
         "description": "Number of companies to return."
+      },
+      {
+        "type": "endpoint",
+        "paramName": "sector",
+        "label": "Sector",
+        "value": "",
+        "description": "Optional. Restrict the ranking to one sector. Narrows the Industry choices.",
+        "optionsEndpoint": "/sectors",
+        "searchable": true
+      },
+      {
+        "type": "endpoint",
+        "paramName": "industry",
+        "label": "Industry",
+        "value": "",
+        "description": "Optional. Restrict the ranking to one industry (choices depend on Sector).",
+        "optionsEndpoint": "/industries",
+        "searchable": true
+      }
+    ]
+  },
+  "sec_sector_aggregates": {
+    "name": "Sector & Industry Aggregates",
+    "description": "Operating statistics by sector, or by industry within a sector. GICS-like reclassification of SIC: Health Care carved out across divisions, cannabis treated as Agriculture. Leave Industry blank for sector-level rows.",
+    "category": "Aggregates",
+    "type": "table",
+    "endpoint": "sector_aggregates",
+    "refetchInterval": false,
+    "gridData": {
+      "w": 40,
+      "h": 18
+    },
+    "data": {
+      "table": {
+        "enableAdvanced": true,
+        "showAll": true,
+        "columnsDefs": [
+          {
+            "field": "Sector",
+            "headerName": "Sector",
+            "cellDataType": "text"
+          },
+          {
+            "field": "Industry",
+            "headerName": "Industry",
+            "cellDataType": "text"
+          },
+          {
+            "field": "Companies",
+            "headerName": "Companies",
+            "cellDataType": "number"
+          },
+          {
+            "field": "% With Revenue",
+            "headerName": "% With Revenue",
+            "cellDataType": "number"
+          },
+          {
+            "field": "% Profitable",
+            "headerName": "% Profitable",
+            "cellDataType": "number"
+          },
+          {
+            "field": "Median Net Margin %",
+            "headerName": "Median Net Margin %",
+            "cellDataType": "number"
+          },
+          {
+            "field": "Median ROA %",
+            "headerName": "Median ROA %",
+            "cellDataType": "number"
+          }
+        ]
+      }
+    },
+    "params": [
+      {
+        "type": "endpoint",
+        "paramName": "sector",
+        "label": "Sector",
+        "value": "",
+        "description": "Pick a sector to narrow the Industry choices and scope the table. Leave blank for all sectors.",
+        "optionsEndpoint": "/sectors",
+        "searchable": true
+      },
+      {
+        "type": "endpoint",
+        "paramName": "industry",
+        "label": "Industry",
+        "value": "",
+        "description": "Optional. Choices depend on the selected sector. Leave blank for sector-level rows.",
+        "optionsEndpoint": "/industries",
+        "searchable": true
       }
     ]
   }

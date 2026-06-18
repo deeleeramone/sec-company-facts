@@ -758,11 +758,19 @@ def metrics():
 def top_companies(
     metric: str = Query("income_statement|total_revenue"),
     limit: int = Query(25, ge=1, le=100),
+    sector: str | None = Query(None),
+    industry: str | None = Query(None),
 ):
     from sec_app.db.query import top_companies_by_ratio, top_companies_by_metric, top_companies_by_sum
+    from sec_app.db.sectors import cik_in_clause
+
+    # Optional sector/industry scope: resolve to a literal CIK IN-list once.
+    cik_filter = cik_in_clause(sector or None, industry or None)
+    if cik_filter == "":  # filter requested, but no company matched
+        return JSONResponse([])
 
     if metric in _BANK_RATIOS:
-        return JSONResponse(top_companies_by_ratio(**_BANK_RATIOS[metric], limit=limit))
+        return JSONResponse(top_companies_by_ratio(**_BANK_RATIOS[metric], limit=limit, cik_filter=cik_filter))
     parts = metric.split("|", 1)
     if len(parts) != 2:
         from fastapi import HTTPException
@@ -775,7 +783,11 @@ def top_companies(
     _FINANCIAL_TEMPLATE_TAGS = {"net_interest_income", "net_income"}
     if "+" in tag:
         tag_a, tag_b = tag.split("+", 1)
-        return JSONResponse(top_companies_by_sum(statement=statement, tag_a=tag_a, tag_b=tag_b, limit=limit))
+        return JSONResponse(
+            top_companies_by_sum(
+                statement=statement, tag_a=tag_a, tag_b=tag_b, limit=limit, cik_filter=cik_filter
+            )
+        )
     if "/" in tag:
         num_tag, denom_tag = tag.split("/", 1)
         _MARGIN_BOUNDS = {"total_revenue": (0.0, 99.99)}
@@ -790,6 +802,7 @@ def top_companies(
                 min_value=min_v,
                 max_value=max_v,
                 min_denominator=min_denom,
+                cik_filter=cik_filter,
             )
         )
     exclude_fin = tag not in _FINANCIAL_TEMPLATE_TAGS
@@ -803,8 +816,40 @@ def top_companies(
             exclude_financial_template=exclude_fin,
             frequency=freq,
             negate=negate,
+            cik_filter=cik_filter,
         )
     )
+
+
+@app.get("/sectors")
+def sectors():
+    """Dropdown options for the sector parameter (each sector + company count)."""
+    from sec_app.db.sectors import list_sectors
+
+    return JSONResponse(list_sectors())
+
+
+@app.get("/industries")
+def industries(sector: str | None = Query(None)):
+    """Dropdown options for the industry parameter, narrowed by the chosen sector."""
+    from sec_app.db.sectors import list_industries
+
+    return JSONResponse(list_industries(sector or None))
+
+
+@app.get("/sector_aggregates")
+def sector_aggregates(
+    sector: str | None = Query(None),
+    industry: str | None = Query(None),
+):
+    """Operating aggregates by sector, or by industry within a sector.
+
+    No ``industry`` -> sector level (all sectors, or one row if ``sector`` given).
+    ``industry`` given -> that industry (``sector`` narrows the valid choices).
+    """
+    from sec_app.db.sectors import sector_industry_aggregates
+
+    return JSONResponse(sector_industry_aggregates(sector=sector or None, industry=industry or None))
 
 
 @app.get("/widgets.json")

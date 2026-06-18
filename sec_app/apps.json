@@ -70,7 +70,22 @@
           "state": {
             "params": {
               "metric": "income_statement|total_revenue",
-              "limit": 25
+              "limit": 25,
+              "sector": "",
+              "industry": ""
+            }
+          }
+        },
+        {
+          "i": "sec_sector_aggregates",
+          "x": 0,
+          "y": 20,
+          "w": 40,
+          "h": 18,
+          "state": {
+            "params": {
+              "sector": "",
+              "industry": ""
             }
           }
         }
