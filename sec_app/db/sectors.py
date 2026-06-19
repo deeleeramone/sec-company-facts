@@ -10,10 +10,11 @@ A GICS-like reclassification layered on raw SIC codes:
   branded MSOs carry no SIC/keyword signal, so a curated ticker list is used).
 * Everything else rolls up by SIC division -> 2-digit major group.
 
-Granularity is driven by the ``industry`` argument:
+Granularity:
 
-* no ``industry``     -> **sector level** (all sectors, or one row if ``sector`` given)
-* ``industry`` given  -> that single **industry** (``sector`` narrows valid choices)
+* nothing selected   -> **sector level** (one row per sector — the overview)
+* ``sector`` given    -> **industry level**, every industry within that sector
+* ``industry`` given  -> that single **industry**
 
 All aggregation is at the CIK grain. ``% With Revenue`` / ``% Profitable`` /
 ``Median Net Margin`` / ``Median ROA`` are currency-invariant (ratios within a
@@ -191,21 +192,32 @@ def _cannabis_subquery() -> str:
 
 
 def _classify_cte() -> str:
-    """WITH ... clause exposing `classified(cik, sector, industry)`."""
+    """WITH ... clause exposing `classified(cik, sic4, sector, industry, sub_industry)`.
+
+    sub_industry is the raw 4-digit SIC description from EDGAR (e.g. "Beverages",
+    "Meat Packing Plants") — the granular level below the 2-digit `industry`.
+    """
+    descr_subq = "(SELECT tag_id FROM xbrl_tags WHERE namespace='dei' AND tag='EntitySicDescription')"
     return f"""WITH code AS (
   SELECT cik, CAST(val AS UNSIGNED) AS sic4
   FROM facts_enc
   WHERE tag_id = {_SIC_CODE_SUBQ} AND val IS NOT NULL
 ),
+sic_descr AS (
+  SELECT cik, val_text AS descr FROM facts_enc
+  WHERE tag_id = {descr_subq} AND val_text IS NOT NULL
+),
 cannabis AS (
   {_cannabis_subquery()}
 ),
 classified AS (
-  SELECT c.cik,
+  SELECT c.cik, c.sic4,
          {_case('sector')} AS sector,
-         {_case('industry')} AS industry
+         {_case('industry')} AS industry,
+         COALESCE(d.descr, CONCAT('SIC ', CAST(c.sic4 AS CHAR))) AS sub_industry
   FROM code c
   LEFT JOIN cannabis can ON can.cik = c.cik
+  LEFT JOIN sic_descr d ON d.cik = c.cik
 )"""
 
 
@@ -248,8 +260,53 @@ def _latest_metric_cte(name: str, tag: str, alias: str, frequency: str = "annual
 )"""
 
 
-def _options(rows: list[tuple]) -> list[dict[str, Any]]:
-    return rows
+def _revenue_cte() -> str:
+    """Latest annual revenue per CIK as ``rev(cik, revenue)``: ``total_revenue``
+    preferred, ``operating_revenue`` as fallback, zeros/nulls excluded — every
+    operating company books some top line, so a 0/NULL is a reporting gap, not a
+    real $0 of revenue."""
+    return """rev AS (
+  SELECT cik, val AS revenue FROM (
+    SELECT cik, val,
+           row_number() OVER (
+               PARTITION BY cik
+               ORDER BY fiscal_year DESC, period_ending DESC,
+                        CASE WHEN tag = 'total_revenue' THEN 0 ELSE 1 END
+           ) AS rn
+    FROM standardized_statements_enc
+    WHERE tag IN ('total_revenue', 'operating_revenue')
+      AND frequency = 'annual' AND val IS NOT NULL AND val <> 0
+  ) z WHERE rn = 1
+)"""
+
+
+def _has_revenue_cte() -> str:
+    """CIKs that book ANY top-line inflow in any annual period — ordinary revenue,
+    bank interest income, or insurance premiums. Financials lead with interest /
+    premiums rather than ``total_revenue``, so checking only revenue badly
+    undercounts them; this captures 'has a top line' across all templates. (It is
+    still not 100%: SPACs/blank-checks and pre-revenue biotech genuinely report
+    none.)"""
+    tags = (
+        "'total_revenue', 'operating_revenue', 'total_interest_income', "
+        "'premiums_earned', 'revenues_excl_interest_dividends', 'total_noninterest_income'"
+    )
+    return f"""has_rev AS (
+  SELECT DISTINCT cik FROM standardized_statements_enc
+  WHERE frequency = 'annual' AND val IS NOT NULL AND val <> 0 AND tag IN ({tags})
+)"""
+
+
+def _productive_cte() -> str:
+    """CIKs with actual productive/operating assets — PP&E, inventory, goodwill or
+    intangibles. Combined with revenue (see has_rev), this defines the universe as
+    operating companies and asset-owning holding companies, excluding pure cash
+    shells and blank-check SPACs (which hold only trust cash/investments)."""
+    tags = "'net_ppe', 'net_inventory', 'goodwill', 'intangible_assets'"
+    return f"""productive AS (
+  SELECT DISTINCT cik FROM standardized_statements_enc
+  WHERE frequency = 'annual' AND val IS NOT NULL AND val > 0 AND tag IN ({tags})
+)"""
 
 
 def list_sectors(db_path: str | None = None) -> list[dict[str, Any]]:
@@ -286,27 +343,45 @@ def sector_industry_aggregates(
     industry: str | None = None,
     db_path: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Aggregate operating statistics by sector or industry.
+    """Aggregate operating statistics, drilling one level at a time.
 
-    * ``industry`` given -> one row for that industry (``sector`` optional, scopes it).
-    * else               -> one row per sector (filtered to ``sector`` if given).
+    * nothing selected   -> one row per **sector** (the overview).
+    * ``sector`` given    -> one row per **industry** (2-digit) within that sector.
+    * ``industry`` given  -> one row per **sub-industry** (4-digit SIC) within it.
+
+    The universe is restricted to real businesses — operating companies (revenue)
+    or holding companies with productive assets (PP&E / inventory / goodwill /
+    intangibles) — so cash shells and blank-check SPACs are excluded.
     """
-    group_field = "industry" if industry else "sector"
-
-    where: list[str] = []
+    # Each selection drills one level deeper. An industry alone determines its
+    # rows (and parents), so a stale sector value never blanks the table.
     if industry:
-        where.append("cl.industry = %s" % _q(industry))
-    if sector:
-        where.append("cl.sector = %s" % _q(sector))
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        group_field = "sub_industry"
+        where_sql = "WHERE cl.industry = %s" % _q(industry)
+    elif sector:
+        group_field = "industry"
+        where_sql = "WHERE cl.sector = %s" % _q(sector)
+    else:
+        group_field = "sector"
+        where_sql = ""
 
     sql = f"""{_classify_cte()},
-{_latest_metric_cte('rev', 'total_revenue', 'revenue')},
+{_revenue_cte()},
+{_has_revenue_cte()},
+{_productive_cte()},
+realbiz AS (
+  SELECT cik FROM has_rev
+  UNION
+  SELECT cik FROM productive
+),
 {_latest_metric_cte('ni', 'net_income', 'net_income')},
 {_latest_metric_cte('ta', 'total_assets', 'assets')}
-SELECT cl.sector, cl.industry, r.revenue, n.net_income, a.assets
+SELECT cl.sector, cl.industry, cl.sub_industry, r.revenue, n.net_income, a.assets,
+       CASE WHEN hr.cik IS NOT NULL THEN 1 ELSE 0 END AS has_revenue
 FROM classified cl
+JOIN realbiz rb ON rb.cik = cl.cik
 LEFT JOIN rev r ON r.cik = cl.cik
+LEFT JOIN has_rev hr ON hr.cik = cl.cik
 LEFT JOIN ni n ON n.cik = cl.cik
 LEFT JOIN ta a ON a.cik = cl.cik
 {where_sql}"""
@@ -318,31 +393,35 @@ LEFT JOIN ta a ON a.cik = cl.cik
         sess.close()
 
     groups: dict[str, dict[str, Any]] = {}
-    for sec, ind, revenue, net_income, assets in rows:
-        key = ind if group_field == "industry" else sec
-        bucket = groups.setdefault(key, {"sector": sec, "industry": ind, "recs": []})
-        bucket["recs"].append((revenue, net_income, assets))
+    for sec, ind, sub, revenue, net_income, assets, has_revenue in rows:
+        key = {"sector": sec, "industry": ind, "sub_industry": sub}[group_field]
+        bucket = groups.setdefault(key, {"sector": sec, "industry": ind, "sub": sub, "recs": []})
+        bucket["recs"].append((revenue, net_income, assets, has_revenue))
 
     out: list[dict[str, Any]] = []
     for key, bucket in groups.items():
         recs = bucket["recs"]
         n = len(recs)
-        n_rev = sum(1 for rv, ni, ta in recs if rv and rv > 0)
-        n_prof = sum(1 for rv, ni, ta in recs if ni and ni > 0)
-        margins = [ni / rv * 100 for rv, ni, ta in recs if rv and rv > 0 and ni is not None]
-        roas = [ni / ta * 100 for rv, ni, ta in recs if ta and ta > 0 and ni is not None]
+        n_rev = sum(1 for rv, ni, ta, hr in recs if hr)
+        n_with_ni = sum(1 for rv, ni, ta, hr in recs if ni is not None)
+        n_prof = sum(1 for rv, ni, ta, hr in recs if ni and ni > 0)
+        # Emit percentage values (62.0 == 62%); the OpenBB "percent" formatter
+        # appends "%" without rescaling, so values must already be in percent.
+        margins = [ni / rv * 100 for rv, ni, ta, hr in recs if rv and rv > 0 and ni is not None]
+        roas = [ni / ta * 100 for rv, ni, ta, hr in recs if ta and ta > 0 and ni is not None]
 
-        row: dict[str, Any] = {}
-        if group_field == "industry":
-            row["Sector"] = bucket["sector"]
-            row["Industry"] = key
-        else:
-            row["Sector"] = key
+        row: dict[str, Any] = {"Sector": bucket["sector"]}
+        if group_field in ("industry", "sub_industry"):
+            row["Industry"] = bucket["industry"]
+        if group_field == "sub_industry":
+            row["Sub-Industry"] = bucket["sub"]
         row["Companies"] = n
-        row["% With Revenue"] = round(100 * n_rev / n) if n else None
-        row["% Profitable"] = round(100 * n_prof / n) if n else None
-        row["Median Net Margin %"] = round(median(margins), 1) if margins else None
-        row["Median ROA %"] = round(median(roas), 1) if roas else None
+        row["With Revenue"] = round(100 * n_rev / n, 1) if n else None
+        # Profitability over companies that actually report earnings, so a SPAC /
+        # shell with no income statement isn't miscounted as "unprofitable".
+        row["Profitable"] = round(100 * n_prof / n_with_ni, 1) if n_with_ni else None
+        row["Median Net Margin"] = round(median(margins), 2) if margins else None
+        row["Median ROA"] = round(median(roas), 2) if roas else None
         out.append(row)
 
     out.sort(key=lambda r: r["Companies"], reverse=True)

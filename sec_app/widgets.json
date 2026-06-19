@@ -440,7 +440,7 @@
         "type": "endpoint",
         "paramName": "sector",
         "label": "Sector",
-        "value": "",
+        "value": null,
         "description": "Optional. Restrict the ranking to one sector. Narrows the Industry choices.",
         "optionsEndpoint": "/sectors",
         "searchable": true
@@ -449,9 +449,12 @@
         "type": "endpoint",
         "paramName": "industry",
         "label": "Industry",
-        "value": "",
+        "value": null,
         "description": "Optional. Restrict the ranking to one industry (choices depend on Sector).",
         "optionsEndpoint": "/industries",
+        "optionsParams": {
+          "sector": "$sector"
+        },
         "searchable": true
       }
     ]
@@ -473,39 +476,51 @@
         "showAll": true,
         "columnsDefs": [
           {
-            "field": "Sector",
-            "headerName": "Sector",
-            "cellDataType": "text"
-          },
-          {
             "field": "Industry",
             "headerName": "Industry",
             "cellDataType": "text"
           },
           {
+            "field": "Sub-Industry",
+            "headerName": "Sub-Industry",
+            "cellDataType": "text"
+          },
+          {
+            "field": "Sector",
+            "headerName": "Sector",
+            "cellDataType": "text"
+          },
+          {
             "field": "Companies",
             "headerName": "Companies",
-            "cellDataType": "number"
+            "cellDataType": "number",
+            "formatterFn": "int"
           },
           {
-            "field": "% With Revenue",
-            "headerName": "% With Revenue",
-            "cellDataType": "number"
+            "field": "With Revenue",
+            "headerName": "With Revenue",
+            "cellDataType": "number",
+            "formatterFn": "percent"
           },
           {
-            "field": "% Profitable",
-            "headerName": "% Profitable",
-            "cellDataType": "number"
+            "field": "Profitable",
+            "headerName": "Profitable",
+            "cellDataType": "number",
+            "formatterFn": "percent"
           },
           {
-            "field": "Median Net Margin %",
-            "headerName": "Median Net Margin %",
-            "cellDataType": "number"
+            "field": "Median Net Margin",
+            "headerName": "Median Net Margin",
+            "cellDataType": "number",
+            "formatterFn": "percent",
+            "renderFn": "greenRed"
           },
           {
-            "field": "Median ROA %",
-            "headerName": "Median ROA %",
-            "cellDataType": "number"
+            "field": "Median ROA",
+            "headerName": "Median ROA",
+            "cellDataType": "number",
+            "formatterFn": "percent",
+            "renderFn": "greenRed"
           }
         ]
       }
@@ -515,8 +530,8 @@
         "type": "endpoint",
         "paramName": "sector",
         "label": "Sector",
-        "value": "",
-        "description": "Pick a sector to narrow the Industry choices and scope the table. Leave blank for all sectors.",
+        "value": null,
+        "description": "Pick a sector to break it down into its industries. Leave blank for the all-sectors overview.",
         "optionsEndpoint": "/sectors",
         "searchable": true
       },
@@ -524,9 +539,12 @@
         "type": "endpoint",
         "paramName": "industry",
         "label": "Industry",
-        "value": "",
-        "description": "Optional. Choices depend on the selected sector. Leave blank for sector-level rows.",
+        "value": null,
+        "description": "Optional. Drill to a single industry (choices depend on the selected sector).",
         "optionsEndpoint": "/industries",
+        "optionsParams": {
+          "sector": "$sector"
+        },
         "searchable": true
       }
     ]

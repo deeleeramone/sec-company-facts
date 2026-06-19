@@ -844,8 +844,8 @@ def sector_aggregates(
 ):
     """Operating aggregates by sector, or by industry within a sector.
 
-    No ``industry`` -> sector level (all sectors, or one row if ``sector`` given).
-    ``industry`` given -> that industry (``sector`` narrows the valid choices).
+    Nothing selected -> sector-level overview. ``sector`` -> its industry breakdown.
+    ``industry`` -> that single industry.
     """
     from sec_app.db.sectors import sector_industry_aggregates
 

@@ -1,5 +1,6 @@
 {
   "name": "SEC Financial Statements",
+  "img": "https://ismg-cdn.nyc3.cdn.digitaloceanspaces.com/articles/sec-releases-updated-cybersecurity-guidance-showcase_image-6-a-10678.jpg",
   "description": "Standardized balance sheet, income statement, and cash flow statement from SEC EDGAR companyfacts.",
   "allowCustomization": true,
   "tabs": {
@@ -17,7 +18,7 @@
             "params": {
               "symbol": "AAPL",
               "period": "FY",
-              "transform": "None",
+              "transform": null,
               "transpose": true,
               "limit": 10
             }
@@ -33,7 +34,7 @@
             "params": {
               "symbol": "AAPL",
               "period": "FY",
-              "transform": "None",
+              "transform": null,
               "transpose": true,
               "limit": 10
             }
@@ -49,7 +50,7 @@
             "params": {
               "symbol": "AAPL",
               "period": "FY",
-              "transform": "None",
+              "transform": null,
               "transpose": true,
               "limit": 10
             }
@@ -71,8 +72,8 @@
             "params": {
               "metric": "income_statement|total_revenue",
               "limit": 25,
-              "sector": "",
-              "industry": ""
+              "sector": null,
+              "industry": null
             }
           }
         },
@@ -84,8 +85,8 @@
           "h": 18,
           "state": {
             "params": {
-              "sector": "",
-              "industry": ""
+              "sector": null,
+              "industry": null
             }
           }
         }
@@ -119,7 +120,7 @@
       "name": "Transform",
       "type": "param",
       "paramName": "transform",
-      "defaultValue": "None",
+      "defaultValue": null,
       "widgetIds": [
         "sec_balance_sheet",
         "sec_income_statement",
@@ -142,6 +143,17 @@
       "type": "param",
       "paramName": "limit",
       "defaultValue": 10,
+      "widgetIds": [
+        "sec_balance_sheet",
+        "sec_income_statement",
+        "sec_cash_flow"
+      ]
+    },
+    {
+      "name": "Currency",
+      "type": "param",
+      "paramName": "convert_to_usd",
+      "defaultValue": true,
       "widgetIds": [
         "sec_balance_sheet",
         "sec_income_statement",
