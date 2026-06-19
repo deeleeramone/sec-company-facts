@@ -152,6 +152,9 @@ def _classify_cte() -> str:
   FROM facts_enc
   WHERE tag_id = {_SIC_CODE_SUBQ} AND val IS NOT NULL
 ),
+tradeable AS (
+  SELECT DISTINCT cik FROM primary_tickers
+),
 sic_descr AS (
   SELECT cik, val_text AS descr FROM facts_enc
   WHERE tag_id = {descr_subq} AND val_text IS NOT NULL
@@ -165,6 +168,7 @@ classified AS (
          {_case('industry')} AS industry,
          COALESCE(d.descr, CONCAT('SIC ', CAST(c.sic4 AS CHAR))) AS sub_industry
   FROM code c
+  JOIN tradeable tk ON tk.cik = c.cik
   LEFT JOIN cannabis can ON can.cik = c.cik
   LEFT JOIN sic_descr d ON d.cik = c.cik
 )"""

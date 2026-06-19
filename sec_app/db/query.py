@@ -950,7 +950,6 @@ def top_companies_by_metric(
             tag=tag,
             frequency=frequency,
         )
-        where_sql += " AND s.period_ending >= CURRENT_DATE - INTERVAL 1 YEAR"
         if cik_filter:
             where_sql += f" AND s.cik IN ({cik_filter})"
         sign = "-1.0" if negate else "1.0"
@@ -1039,7 +1038,7 @@ def top_companies_by_sum(
     sess = _session(db_path)
     where_a = _standardized_where_clause(statement=statement, tag=tag_a, frequency="annual")
     where_b = _standardized_where_clause(statement=statement, tag=tag_b, frequency="annual")
-    _recent = " AND s.period_ending >= CURRENT_DATE - INTERVAL 1 YEAR"
+    _recent = ""
     where_a += _recent
     where_b += _recent
     if cik_filter:
@@ -1165,7 +1164,7 @@ def top_companies_by_ratio(
     denom_stmt = denominator_statement if denominator_statement is not None else statement
     num_where = _standardized_where_clause(statement=statement, tag=numerator_tag, frequency="annual")
     denom_where = _standardized_where_clause(statement=denom_stmt, tag=denominator_tag, frequency="annual")
-    _recent = " AND s.period_ending >= CURRENT_DATE - INTERVAL 1 YEAR"
+    _recent = ""
     num_where += _recent
     denom_where += _recent
     if cik_filter:
