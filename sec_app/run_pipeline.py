@@ -1,18 +1,3 @@
-"""One-shot pipeline runner for the SEC Dolt store.
-
-Order of stages, single-pass:
-    1. companyfacts ingest — also derives processed_ciks
-    2. cross-reference ingest (tickers / funds / entities) from SEC index files
-    3. multi-CIK overrides
-    4. submissions ingest, scoped to processed_ciks
-    5. standardized_statements materialization
-    6. exchange-rate refresh (ECB) for USD normalization in rankings
-
-Usage:
-    python -m sec_app.run_pipeline \\
-                --download-cache /var/cache/openbb_sec
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -97,8 +82,6 @@ def main(argv: list[str] | None = None) -> int:
             f"changed_subs={result['changed_subs']:,} ===",
             flush=True,
         )
-        # Exit non-zero only on hard error; 0 changes is a valid (just
-        # surprising) outcome — the caller's monitor decides whether to alarm.
         return 0
     proc = psutil.Process(os.getpid())
     peak_rss = [0]
@@ -166,16 +149,11 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
         if pre_std > 0:
-            # Single-pass design: standardized statements are materialized inline
-            # during Stage 1 ingest. They are already present, so skip the
-            # redundant second pass over the DB.
             print(
                 f"[stage5] already materialized inline during Stage 1 (rows={pre_std:,}); skipping second pass",
                 flush=True,
             )
         else:
-            # Recovery only: facts were unchanged (nothing re-ingested) yet
-            # standardized is empty — materialize from what is in the DB.
             std_result = materialize_standardized_statements(workers=args.workers)
             post_processed, post_std = _derived_counts()
             print(

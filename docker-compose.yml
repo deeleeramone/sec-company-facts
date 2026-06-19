@@ -33,4 +33,4 @@ services:
 volumes:
   sec_dolt_data:
     name: sec_dolt_data
-  #  external: true
+    external: true

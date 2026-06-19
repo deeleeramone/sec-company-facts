@@ -1,30 +1,3 @@
-"""FastAPI backend for the OpenBB Workspace SEC Financial Statements app.
-
-Exposes:
-* GET /balance_sheet?symbol=AAPL&period=FY&transform=None&limit=10
-* GET /income_statement?symbol=AAPL&period=FY&transform=None&limit=10
-* GET /cash_flow?symbol=AAPL&period=FY&transform=None&limit=10
-* GET /widgets.json
-* GET /apps.json
-
-``period`` selects the underlying data frequency and ``transform`` selects
-the optional growth calculation applied on top — the two are independent
-because YoY / PoP can be applied to TTM data as well as to raw FY / Q.
-
-Period mapping for raw values (transform=None):
-  FY  -> period='annual'
-  Q   -> period='quarterly'
-  TTM -> period='ttm'
-
-Growth mapping (transform != None) routes through the
-``Sec*GrowthFetcher`` family — they accept a wider period vocabulary that
-embeds the YoY / PoP semantics:
-  (FY,  % YoY) -> growth period='annual'         (annual YoY %)
-  (Q,   % YoY) -> growth period='quarterly_yoy'  (same Q vs prior year %)
-  (Q,   % PoP) -> growth period='quarterly'      (sequential quarter %)
-  (TTM, % PoP) -> growth period='ttm'            (TTM PoP %)
-"""
-
 from __future__ import annotations
 
 import json
@@ -57,10 +30,6 @@ from openbb_sec.models.income_statement_growth import (
     SecIncomeStatementGrowthFetcher,
 )
 
-# Serve standardized financials from the local Dolt store. The openbb-sec
-# fetchers import ``get_standardized_financials`` from the provider at call time,
-# so rebinding it here points them at the DB-backed implementation (precomputed
-# table + provider standardization fallback) instead of re-fetching per request.
 import openbb_sec.utils.company_facts as _provider_company_facts
 from sec_app.standardize import get_standardized_financials as _db_get_standardized_financials
 
@@ -75,12 +44,6 @@ _PERIOD_MAP: dict[str, str] = {
     "TTM": "ttm",
 }
 
-# (period, transform) -> period kwarg for the *Growth fetcher.
-# TTM intentionally absent: the upstream growth fetcher's "ttm" mapping
-# resolves to PeriodType "pop" which runs on quarterly (not TTM) records.
-# (TTM, %YoY) and (TTM, %PoP) are computed locally from raw TTM rows.
-# Annual PoP === Annual YoY (the prior period IS the prior year), so both
-# (FY, %YoY) and (FY, %PoP) route to growth period="annual".
 _GROWTH_MAP: dict[tuple[str, str], str] = {
     ("FY", "% YoY"): "annual",
     ("FY", "% PoP"): "annual",
@@ -88,8 +51,6 @@ _GROWTH_MAP: dict[tuple[str, str], str] = {
     ("Q", "% PoP"): "quarterly",
 }
 
-# Raw fetcher -> growth Data class for the TTM-local growth path.  Keyed by
-# raw fetcher so the right Pydantic schema is used to wrap the computed rows.
 _GROWTH_DATA_FOR = {
     SecBalanceSheetFetcher: SecBalanceSheetGrowthData,
     SecIncomeStatementFetcher: SecIncomeStatementGrowthData,
@@ -107,13 +68,6 @@ _NON_MONETARY_FIELDS = frozenset({"period_ending", "fiscal_year", "fiscal_period
 
 
 def _convert_rows_to_usd(rows):
-    """Return a new list of model instances with monetary fields converted to USD.
-
-    Uses the nearest available ECB rate on or before each period_ending date
-    (within a 14-day lookback window) to handle weekends and holidays.
-    Rows already in USD, or with no reported_currency, are returned unchanged.
-    If a rate cannot be found the row is returned unconverted (best-effort).
-    """
     import bisect
     from collections import defaultdict
 
@@ -151,9 +105,9 @@ def _convert_rows_to_usd(rows):
             min_date=min_date,
             max_date=max_date,
         )
-        result = client.execute(sql)
+        result = client.execute(sql, stream=True)
         rates_by_currency: dict[str, list] = defaultdict(list)
-        for r in result.fetchall():
+        for r in result:
             rates_by_currency[r[1]].append((r[0], r[2]))
         rate_map: dict[tuple, float] = {}
         for date_str, currency in pairs:
@@ -192,22 +146,6 @@ def _convert_rows_to_usd(rows):
 
 
 async def _fetch_ttm_growth(raw_fetcher, symbol: str, mode: str):
-    """Compute TTM YoY or TTM PoP locally from raw TTM rows.
-
-    The upstream Sec*GrowthFetcher's ``period="ttm"`` actually runs PoP on
-    quarterly data (not on TTM aggregates), so neither YoY nor PoP on TTM
-    is correctly served by the existing mapping.  We pull raw TTM via the
-    raw fetcher (which produces one row per quarter end with 4-quarter
-    rolling sums for duration items and averages for instant items), sort
-    ascending, and walk index-offset pairs:
-
-      * mode="yoy" -> offset 4 (same calendar quarter, prior year)
-      * mode="pop" -> offset 1 (immediately preceding TTM)
-
-    The resulting rows are validated as the corresponding *GrowthData
-    Pydantic class so downstream display logic treats them identically to
-    fetcher-produced growth rows.
-    """
     growth_cls = _GROWTH_DATA_FOR[raw_fetcher]
     result = await raw_fetcher.fetch_data({"symbol": symbol, "period": "ttm", "limit": None}, {})
     rows, metadata = _extract_rows_and_metadata(result)
@@ -412,7 +350,6 @@ app.add_middleware(
 
 
 def _ci_lookup(value: str, choices) -> str | None:
-    """Return the canonical choice matching ``value`` case-insensitively."""
     return next((c for c in choices if c.lower() == value.lower()), None)
 
 
@@ -424,12 +361,6 @@ async def _fetch_statement(
     transform: str,
     limit: int,
 ):
-    """Run the appropriate fetcher (raw or growth) and return Data instances.
-
-    Returning Pydantic model instances directly lets FastAPI's serializer
-    invoke ``@model_serializer`` (NaN -> None, declared field order
-    preserved).  ``limit=0`` (or negative) returns every period.
-    """
     period_key = _ci_lookup(period, _PERIOD_MAP)
     if period_key is None:
         raise HTTPException(
@@ -446,16 +377,12 @@ async def _fetch_statement(
 
     try:
         if transform_key == "None":
-            # Force ``limit=None`` so the fetcher returns every available
-            # period.  The cash-flow standard model defaults limit to 5,
-            # which would silently truncate before our widget-level slice.
             result = await raw_fetcher.fetch_data(
                 {"symbol": symbol, "period": _PERIOD_MAP[period_key], "limit": None},
                 {},
             )
             rows, metadata = _extract_rows_and_metadata(result)
         elif period_key == "TTM":
-            # Local YoY/PoP over raw TTM rows — see _fetch_ttm_growth.
             mode = "yoy" if transform_key == "% YoY" else "pop"
             rows, metadata = await _fetch_ttm_growth(raw_fetcher, symbol, mode)
         else:
@@ -481,11 +408,8 @@ async def _fetch_statement(
 
 
 _LABEL_KEY = "Line Item"
-_SKIP_FIELDS = frozenset({"period_ending"})  # already used as the column key
+_SKIP_FIELDS = frozenset({"period_ending"})
 
-# Per-field value formatters — applied during transpose so the workspace's
-# numeric formatter doesn't render integers (like fiscal_year) with thousands
-# separators ("FY 2,024").
 _VALUE_FORMATTERS = {
     "fiscal_year": lambda v: None if v is None else f"FY{int(v)}",
 }
@@ -513,34 +437,19 @@ _ACRONYMS = {
 
 
 def _humanize(field: str) -> str:
-    """snake_case → Title Case, with common financial acronyms uppercased."""
     return " ".join(_ACRONYMS.get(p, p.capitalize()) for p in field.split("_"))
 
 
 def _is_imputed(values) -> bool:
-    """A field carries no real data when every period is None or 0.
-
-    SEC standardization fills missing tags with 0 for additivity (so a
-    bank's blank-on-AAPL ``loans_and_leases`` doesn't break a sum); those
-    imputed zeros are noise in the display.
-    """
     return all(v is None or v == 0 for v in values)
 
 
 def _untransposed(rows):
-    """Return wide period-major rows (one dict per period).
-
-    Drops columns that are None across every period and applies the same
-    per-field formatters as ``_transpose_for_widget``.  Field declaration
-    order from the Pydantic model is preserved on every emitted dict.
-    """
     if not rows:
         return []
 
     model = type(rows[0])
     serialized = [r.model_dump(mode="json") for r in rows]
-    # Charts plot rows left-to-right; sort oldest-first so the time axis
-    # reads chronologically.  (Transposed mode keeps newest-first columns.)
     serialized.sort(key=lambda r: r.get("period_ending") or "")
 
     keep_fields: list[str] = []
@@ -564,32 +473,11 @@ def _untransposed(rows):
 
 
 def _transpose_for_widget(rows, field_metadata: dict[str, dict]):
-    """Pivot wide period-major rows into long field-major rows.
-
-    Input  : list of Pydantic Data instances, one per period (most-recent
-             first), each carrying every field declared on the model.
-    Output : list of dicts, one per *field*, with one column per period.
-             - field declaration order preserved
-             - fields whose value is None / unset for every period are dropped
-             - period_ending is used as the column key, so it is not also
-               emitted as its own row
-
-    Example output row:
-      {"Line Item": "Total Assets",
-       "2025-09-27": 359241000000.0,
-       "2024-09-28": 364980000000.0}
-    """
     if not rows:
         return []
 
     model = type(rows[0])
     serialized = [r.model_dump(mode="json") for r in rows]
-    # Force newest-first columns regardless of fetcher order, then namespace
-    # the column key with fiscal_period so switching FY ↔ Q ↔ TTM cannot
-    # collide on a shared anchor date (e.g. AAPL's Sept-27 quarter end is
-    # both an FY end and a TTM anchor).  Without the prefix the workspace
-    # carries over the prior column slot and the new period's data lands in
-    # the wrong order.
     serialized.sort(key=lambda r: r.get("period_ending") or "", reverse=True)
     columns = [f"{r.get('fiscal_period') or ''} {r.get('period_ending') or ''}".strip() for r in serialized]
 
@@ -691,10 +579,6 @@ async def cash_flow(
 
 @app.get("/companies")
 def companies():
-    """Dropdown options for the symbol parameter — every company that has
-    standardized statements, ordered by SEC source rank (largest first).
-    Each entry is the {label, value, extraInfo: {...}} shape the workspace
-    expects from an ``optionsEndpoint``."""
     from sec_app.db.query import list_company_choices
 
     return JSONResponse(list_company_choices())
@@ -764,9 +648,8 @@ def top_companies(
     from sec_app.db.query import top_companies_by_ratio, top_companies_by_metric, top_companies_by_sum
     from sec_app.db.sectors import cik_in_clause
 
-    # Optional sector/industry scope: resolve to a literal CIK IN-list once.
     cik_filter = cik_in_clause(sector or None, industry or None)
-    if cik_filter == "":  # filter requested, but no company matched
+    if cik_filter == "":
         return JSONResponse([])
 
     if metric in _BANK_RATIOS:
@@ -777,8 +660,6 @@ def top_companies(
 
         raise HTTPException(status_code=400, detail="metric must be 'statement|tag'")
     statement, tag = parts
-    # A literal '+' in a query string decodes to a space; tags never contain
-    # spaces, so restore it so the sum metric (e.g. FCF) routes correctly.
     tag = tag.replace(" ", "+")
     _FINANCIAL_TEMPLATE_TAGS = {"net_interest_income", "net_income"}
     if "+" in tag:
@@ -823,7 +704,6 @@ def top_companies(
 
 @app.get("/sectors")
 def sectors():
-    """Dropdown options for the sector parameter (each sector + company count)."""
     from sec_app.db.sectors import list_sectors
 
     return JSONResponse(list_sectors())
@@ -831,7 +711,6 @@ def sectors():
 
 @app.get("/industries")
 def industries(sector: str | None = Query(None)):
-    """Dropdown options for the industry parameter, narrowed by the chosen sector."""
     from sec_app.db.sectors import list_industries
 
     return JSONResponse(list_industries(sector or None))
@@ -842,11 +721,6 @@ def sector_aggregates(
     sector: str | None = Query(None),
     industry: str | None = Query(None),
 ):
-    """Operating aggregates by sector, or by industry within a sector.
-
-    Nothing selected -> sector-level overview. ``sector`` -> its industry breakdown.
-    ``industry`` -> that single industry.
-    """
     from sec_app.db.sectors import sector_industry_aggregates
 
     return JSONResponse(sector_industry_aggregates(sector=sector or None, industry=industry or None))

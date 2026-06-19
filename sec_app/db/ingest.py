@@ -1,5 +1,3 @@
-"""Dolt ingest for the SEC store."""
-
 from __future__ import annotations
 
 import atexit
@@ -35,28 +33,16 @@ def _table(name: str) -> str:
 
 
 def _connect(db_path: str | None = None):
-    """Return a Dolt connection.
-
-    Connection details come from the ``DOLT_SQL_*`` environment variables and the
-    schema is assumed already present in the repo. ``db_path`` is ignored.
-    """
     del db_path
     conn = connect_dolt()
     _OPEN_CONNECTIONS.add(conn)
     return conn
 
 
-# Open connections not yet finalized; closed at each write entry point and as a
-# process-exit safety net.
 _OPEN_CONNECTIONS: set[Any] = set()
 
 
 def _finalize(conn) -> None:
-    """Close the connection.
-
-    Safe to call more than once and on an already-closed connection — all
-    failures are swallowed so finalize never masks the real error.
-    """
     _OPEN_CONNECTIONS.discard(conn)
     try:
         conn.finalize()
@@ -67,7 +53,6 @@ def _finalize(conn) -> None:
 
 @atexit.register
 def _finalize_open_connections() -> None:
-    """Last-resort flush so an unhandled exception can't strand the WAL."""
     for conn in list(_OPEN_CONNECTIONS):
         _finalize(conn)
 
@@ -204,8 +189,6 @@ def _replace_rows_for_ciks(conn, table: str, rows: list[dict[str, Any]], schema:
         return
     ciks = sorted({row.get("cik") for row in rows if isinstance(row, dict) and row.get("cik")})
     print(f"[db] replace begin table={table} rows={len(rows):,} ciks={len(ciks):,}", flush=True)
-    # Delete the touched CIKs in chunks — a single IN(...) list with 600k+
-    # entries blows past MySQL's max_allowed_packet and is slow on DuckDB too.
     for i in range(0, len(ciks), 500):
         chunk = ciks[i : i + 500]
         placeholders = ",".join(["?"] * len(chunk))
@@ -457,16 +440,7 @@ _MULTI_CIK_SCHEMA = pa.schema(
 )
 
 
-# --------------------------------------------------------------------------- #
 # Dictionary-encoding helpers
-#
-# The big tables store repeated strings as INT ids into dim tables
-# (xbrl_tags, accessions, sources, std_presentation). Row builders keep
-# producing the full human-readable dicts; these helpers translate them into
-# encoded rows at the insert sites. Caches are per-process: dim ids are
-# immutable once created, and every rollback path in this module re-raises,
-# so a poisoned cache entry can never outlive the failed run.
-# --------------------------------------------------------------------------- #
 
 _TAG_ID_CACHE: dict[tuple[str, str], int] = {}
 _ACCN_ID_CACHE: dict[str, int] = {}
@@ -617,10 +591,6 @@ def ingest_companyfacts_zip(
     print(f"[facts] ingest start zip={zip_path} limit={limit}", flush=True)
 
     inline_on = os.environ.get("SEC_INLINE_STANDARDIZED", "1") == "1"
-    # The standardized resolve (~0.5s/large company) is the bottleneck; run it in a
-    # process pool across cores. Create the pool BEFORE opening the DuckDB
-    # connection so the forked workers don't inherit a DB handle. Workers only
-    # resolve in-memory payloads — they never touch the database.
     n_workers = max(1, min(int(os.environ.get("SEC_INGEST_WORKERS", "0")) or (os.cpu_count() or 2), os.cpu_count() or 2))
     pool = multiprocessing.Pool(n_workers) if (inline_on and n_workers > 1) else None
     batch_size = int(os.environ.get("SEC_INGEST_BATCH", "256"))
@@ -630,8 +600,6 @@ def ingest_companyfacts_zip(
     conn = _connect(db_path)
     existing_hashes = _existing_hashes(conn, _table("companies"))
 
-    # Tags that define "has a statement" — only CIKs whose facts intersect these
-    # get standardized statements materialized (same membership as processed_ciks).
     _stmt_tag_sets = _load_statement_tag_sets()
     _all_stmt_tags = _stmt_tag_sets["balance_sheet"] | _stmt_tag_sets["income_statement"] | _stmt_tag_sets["cash_flow"]
 
@@ -682,9 +650,6 @@ def ingest_companyfacts_zip(
 
         stats["changed"] += 1
         existing_hashes[cik_norm] = content_hash
-        # Only delete prior rows when this CIK actually existed before (an update).
-        # On a fresh ingest (prev_hash is None) the tables hold nothing for it, so
-        # the DELETEs would be pure full-table scans over the large tables — skip.
         if prev_hash is not None:
             conn.execute(f"DELETE FROM {_table('companies')} WHERE cik = ?", [cik_norm])
             conn.execute(f"DELETE FROM {_table('cik_tags')} WHERE cik = ?", [cik_norm])
@@ -752,9 +717,6 @@ def ingest_companyfacts_zip(
                             }
                         )
 
-        # A company with no fact values carries no financial data — do not insert
-        # an empty companies row for it. (Existing rows for this CIK were already
-        # deleted above, so this also removes a CIK that has lost all its facts.)
         if not facts:
             print(f"[facts] cik={cik_norm} no fact values — skipping (company not inserted)", flush=True)
             continue
@@ -767,17 +729,10 @@ def ingest_companyfacts_zip(
         _insert_arrow(conn, _table("cik_tags"), _encode_tag_meta_rows(conn, tag_meta), _CIK_TAGS_SCHEMA)
         _insert_arrow(conn, _table("facts_enc"), _encode_fact_rows(conn, facts), _FACTS_ENC_SCHEMA)
 
-        # Materialize standardized statements in the SAME pass (single-pass design),
-        # resolving from the in-memory payload — no second read of the DB. ONLY for
-        # CIKs that actually have a statement (their tags intersect the statement
-        # tag sets); others are skipped entirely — never blindly resolved/inserted.
-        # Set SEC_INLINE_STANDARDIZED=0 to disable and use the standalone step.
         has_statements = any(
             tm["namespace"] in ("us-gaap", "ifrs-full") and tm["tag"] in _all_stmt_tags for tm in tag_meta
         )
         if has_statements and inline_on:
-            # Queue the (CPU-heavy) resolve for the worker pool; the standardized
-            # rows are inserted when the batch flushes.
             resolve_batch.append((cik_norm, data))
             if len(resolve_batch) >= batch_size:
                 _flush_resolve_batch()
@@ -795,7 +750,7 @@ def ingest_companyfacts_zip(
                 flush=True,
             )
 
-    _flush_resolve_batch()  # resolve + insert any remaining queued companies
+    _flush_resolve_batch()
     if pool is not None:
         pool.close()
         pool.join()
@@ -822,15 +777,6 @@ def ingest_directory(
 
 
 def _load_statement_tag_sets() -> dict[str, set[str]]:
-    """us-gaap/ifrs-full XBRL tags per statement, read from the schema JSONs.
-
-    This is the single source of truth for which CIKs "have" a statement: the
-    exact membership used both to populate processed_ciks and to decide which
-    CIKs get standardized statements materialized. A CIK whose tags intersect
-    none of these sets is never resolved or inserted.
-    """
-    # The statement-schema JSONs ship inside the openbb-sec provider (PyPI), not
-    # in this serving package.
     import openbb_sec.utils.statement_schema as _statement_schema_pkg  # pylint: disable=import-outside-toplevel
 
     schema_dir = Path(_statement_schema_pkg.__file__).resolve().parent / "schemas"
@@ -1133,7 +1079,6 @@ def _iso(v):
 
 
 def _load_company_facts_from_conn(conn, cik: str) -> dict[str, Any]:
-    """Load company facts using an already-open connection to avoid second-connection conflicts."""
     verbose = os.environ.get("SEC_LOAD_VERBOSE", "1") == "1"
     cik_padded = cik.zfill(10)
     if verbose:
@@ -1193,14 +1138,6 @@ def _load_company_facts_from_conn(conn, cik: str) -> dict[str, Any]:
 
 
 def _resolve_standardized_with_fallback(cik: str, facts_json: dict[str, Any]):
-    """Resolve standardized statements, picking the period up front.
-
-    Many filers (foreign 20-F, small/annual-only) report no quarterly periods.
-    Calling period="both" for them does the full annual extraction, raises on the
-    missing quarterly, and then the annual retry redoes it — doubling the work for
-    a large fraction of companies. Instead, check cheaply whether quarterly
-    periods exist and resolve once with the right period.
-    """
     facts = facts_json.get("facts", facts_json)
     period = "both" if get_filing_dates(facts, "quarterly") else "annual"
     try:
@@ -1212,11 +1149,6 @@ def _resolve_standardized_with_fallback(cik: str, facts_json: dict[str, Any]):
 
 
 def _resolve_std_worker(args: tuple) -> tuple:
-    """Pool worker: resolve standardized rows for one company. CPU-only, no DB.
-
-    Returns (cik, rows, error_repr_or_None). The resolve step (~0.5s for a large
-    filer) is the build's bottleneck; running it across cores is the whole point.
-    """
     cik_norm, data = args
     try:
         result = _resolve_standardized_with_fallback(cik_norm, data)
@@ -1226,7 +1158,6 @@ def _resolve_std_worker(args: tuple) -> tuple:
 
 
 def _standardized_rows_for_result(cik: str, result) -> list[dict[str, Any]]:
-    """Flatten a resolved StandardizedStatements result into DB rows."""
     rows: list[dict[str, Any]] = []
     for stmt_name in ("balance_sheet", "income_statement", "cash_flow"):
         for rec in getattr(result, stmt_name, None) or []:
@@ -1281,12 +1212,8 @@ def materialize_standardized_statements(
     insert_batch_rows: int = 10_000,
     only_ciks: set[str] | None = None,
 ) -> dict[str, int]:
-    # Single-threaded by design: the production container is memory-limited
-    # (2 GB), where spawning resolver processes would OOM. Per-CIK fact lookups
-    # are fast because of the cik index declared in the schema. One connection is
-    # used for both reads and the per-CIK write transaction.
     del workers, progress_every, insert_batch_rows
-    os.environ.setdefault("SEC_LOAD_VERBOSE", "0")  # keep per-CIK load logs quiet at scale
+    os.environ.setdefault("SEC_LOAD_VERBOSE", "0")
 
     conn = _connect(db_path)
     stats = {"ciks_processed": 0, "ciks_empty": 0, "rows_inserted": 0}
@@ -1481,15 +1408,6 @@ def ingest_multi_cik_overrides(db_path: str | None = None) -> int:
 
 
 def ingest_exchange_rates(db_path: str | None = None, lookback_days: int = 3650) -> dict[str, int]:
-    """Refresh the exchange_rates table from ECB reference rates.
-
-    Idempotent: ``load_exchange_rates`` replaces the table atomically (it deletes
-    and reloads in one transaction only after the ECB fetch succeeds), so a failed
-    refresh leaves the existing rates intact instead of emptying the table.
-    ECB publishes ~30 major currencies; statements in any currency ECB does not
-    cover stay unconverted and are excluded from USD aggregations by the read-side
-    queries.
-    """
     from sec_app.db.exchange_rates import load_exchange_rates  # pylint: disable=import-outside-toplevel
 
     print("[rates] ingest start", flush=True)
@@ -1809,13 +1727,6 @@ def run_update(
         print(f"[update] recomputing processed_ciks for {len(changed_facts):,} ciks", flush=True)
         compute_processed_ciks(db_path=db_path, only_ciks=changed_facts)
 
-    # standardized_statements is derived purely from companyfacts: financial
-    # line items, their reporting currency, and company_type (which detect_type
-    # classifies from financial-tag presence only). It does NOT depend on
-    # submissions/dei metadata (SIC, entityType, fiscalYearEnd, ...). So only
-    # CIKs whose facts actually changed need rematerializing — re-running it for
-    # every CIK whose submissions index changed (a new 8-K/Form 4/13F, etc.)
-    # just rewrites byte-identical rows.
     ciks_to_materialize = changed_facts
     if ciks_to_materialize:
         print(f"[update] materializing standardized_statements for {len(ciks_to_materialize):,} changed ciks", flush=True)
@@ -1825,8 +1736,6 @@ def run_update(
 
     _finalize(conn)
 
-    # Refresh FX rates every update — they change daily and feed the USD
-    # normalization in the ranking queries.
     try:
         ingest_exchange_rates(db_path=db_path)
     except Exception as e_rates:  # pylint: disable=broad-except

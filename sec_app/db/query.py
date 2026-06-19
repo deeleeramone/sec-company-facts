@@ -1,8 +1,3 @@
-"""Read-side helpers for the SEC DuckDB store.
-
-CIK values are always 10-digit zero-padded strings.
-"""
-
 from __future__ import annotations
 
 import gzip
@@ -36,13 +31,6 @@ def _row(sess, sql: str):
 
 
 def _primary_ticker_by_cik() -> str:
-    """One ticker per CIK for cik->ticker lookups in aggregate rankings.
-
-    The primary_tickers view keeps every is_primary ticker (share classes, ADRs,
-    preferreds, structured products all carry is_primary=true), so joining it
-    directly fans a single company into several ranking rows. Pick the lowest
-    SEC popularity rank (common stock — e.g. JPM rank 12 over the JPM-P*/VYLD/AMJB
-    preferreds at 7000+) so each company appears once."""
     return f"""(
         SELECT cik, ticker FROM (
             SELECT cik, ticker,
@@ -78,7 +66,6 @@ def load_company_facts(
     cik: str,
     db_path: str | None = None,
 ) -> dict[str, Any]:
-    """Reconstruct the SEC company-facts JSON shape for a single CIK."""
     cik_padded = _zpad_cik(cik)
     sess = _session(db_path)
     try:
@@ -157,14 +144,6 @@ def load_standardized_statements(
     period: str,
     db_path: str | None = None,
 ):
-    """Build StandardizedStatements from the precomputed ``standardized_statements``
-    table (values) plus the static schema (line-item metadata).
-
-    Returns None when the table cannot serve the request, so the caller falls
-    back to recomputing from raw facts. The table only holds the default
-    annual/quarterly standardization, so anything else (ttm, point-in-time,
-    preliminary, specific fiscal years) takes the fallback.
-    """
     if period not in ("annual", "quarterly") or not cik_list:
         return None
     sess = _session(db_path)
@@ -261,20 +240,6 @@ def list_companies_with_financials(
 def list_company_choices(
     db_path: str | None = None,
 ) -> list[dict]:
-    """Return one entry per company that has standardized financial data,
-    formatted for autocomplete/selection UIs:
-
-        {
-          "label": "<company name>",
-          "value": "<primary ticker>",
-          "extraInfo": {
-            "description": "<ticker> | <cik>",
-            "rightOfDescription": "<sic name>"
-          }
-        }
-
-    Ordered by SEC's source rank (largest by market cap first).
-    """
     sess = _session(db_path)
     try:
         rows = _rows(
@@ -380,13 +345,7 @@ def search_entities(
     return [(row[0], row[1]) for row in rows]
 
 
-# SEC EDGAR's "stateOrCountry" code list (used in submissions JSON and in
-# dei.EntityStateOfIncorporation).  Combines US states, Canadian provinces,
-# and countries.  Authoritative source is SEC's EDGAR filer manual; the
-# XBRL stpr / country taxonomies only cover a subset (US states only / ISO
-# 3166-1 only) so we ship the SEC list directly.
 SEC_LOCATION_CODES: dict[str, str] = {
-    # US states + DC
     "AL": "Alabama",
     "AK": "Alaska",
     "AZ": "Arizona",
@@ -438,12 +397,10 @@ SEC_LOCATION_CODES: dict[str, str] = {
     "WV": "West Virginia",
     "WI": "Wisconsin",
     "WY": "Wyoming",
-    # US territories
     "GU": "Guam",
     "PR": "Puerto Rico",
     "VI": "Virgin Islands, U.S.",
     "X1": "United States",
-    # Canadian provinces (SEC custom codes, not ISO)
     "A0": "Alberta, Canada",
     "A1": "British Columbia, Canada",
     "A2": "Manitoba, Canada",
@@ -456,7 +413,6 @@ SEC_LOCATION_CODES: dict[str, str] = {
     "A9": "Saskatchewan, Canada",
     "B0": "Yukon, Canada",
     "Z4": "Canada (Federal Level)",
-    # Other countries (SEC custom codes)
     "B2": "Afghanistan",
     "Y6": "Aland Islands",
     "B3": "Albania",
@@ -701,7 +657,6 @@ SEC_LOCATION_CODES: dict[str, str] = {
     "XX": "Unknown",
 }
 
-# Sets for quick US-vs-foreign classification.
 _US_STATE_CODES = frozenset(
     {
         "AL",
@@ -764,21 +719,18 @@ _US_STATE_CODES = frozenset(
 
 
 def _decode_location(code: str | None) -> str | None:
-    """Decode a SEC EDGAR stateOrCountry code to its human name."""
     if not code:
         return None
     return SEC_LOCATION_CODES.get(code)
 
 
 def _decode_state(code: str | None) -> str | None:
-    """Only return a name if the code is a US state/territory."""
     if not code or code not in _US_STATE_CODES:
         return None
     return SEC_LOCATION_CODES.get(code)
 
 
 def _decode_country(code: str | None) -> str | None:
-    """Only return a name if the code is a foreign country (non-US-state)."""
     if not code or code in _US_STATE_CODES:
         return None
     return SEC_LOCATION_CODES.get(code)
@@ -788,30 +740,11 @@ def company_profile(
     cik_or_ticker: str,
     db_path: str | None = None,
 ) -> dict[str, Any] | None:
-    """Comprehensive company profile in one round-trip.
-
-    Resolves a CIK or ticker, follows the multi-CIK ``cik_canonical``
-    rollup if applicable, then assembles:
-
-    * primary ticker / secondary tickers / name
-    * canonical CIK + all related CIKs
-    * exchanges (from submissions blob)
-    * stateOfIncorporation + country code
-    * SIC code + SIC description
-    * latest shares outstanding + EntityPublicFloat (closest proxy for
-      market cap — full market cap needs price data, not in this DB)
-    * fiscal year end (MMDD)
-    * earliest + latest period captured (from standardized_statements)
-
-    Returns None if the input doesn't resolve.
-    """
-    # Resolve input → set of CIKs (handles ticker, single CIK, multi-CIK).
     sess = _session(db_path)
     try:
         token = str(cik_or_ticker).strip()
         ciks: list[str] = []
         if token.upper() != token.lower() or not token.isdigit():
-            # Likely a ticker — try resolution.
             ciks = resolve_symbol(token, db_path)
         if not ciks:
             try:
@@ -819,7 +752,6 @@ def company_profile(
             except OpenBBError:
                 return None
 
-        # Canonical CIK (newest) + all related CIKs that roll up to it.
         primary_cik_row = _row(
             sess,
             f"SELECT primary_cik FROM {DATABASE_NAME}.cik_canonical WHERE cik = {_q(ciks[0])} LIMIT 1",
@@ -831,35 +763,26 @@ def company_profile(
             sess,
             f"SELECT cik FROM {DATABASE_NAME}.cik_canonical WHERE primary_cik = {_q(primary_cik)}",
         )
-        # All CIKs that roll up to the primary, including the primary itself
-        # (used for the IN clause).  ``related_ciks`` returned to the caller
-        # excludes the primary so it doesn't double-list it.
         all_ciks = sorted({r[0] for r in related_rows} | {primary_cik})
         related_ciks = [c for c in all_ciks if c != primary_cik]
         ciks_in = "(" + ",".join(_q(c) for c in all_ciks) + ")"
 
-        # Entity name.
         name_row = _row(
             sess,
             f"SELECT entity_name FROM {DATABASE_NAME}.companies WHERE cik = {_q(primary_cik)} LIMIT 1",
         )
         entity_name = name_row[0] if name_row else None
 
-        # Tickers — primary + secondaries (across the related CIKs).
         ticker_rows = _rows(
             sess,
             f"SELECT ticker, is_primary, cik FROM {DATABASE_NAME}.tickers "
             f"WHERE cik IN {ciks_in} ORDER BY is_primary DESC, length(ticker), ticker",
         )
         primary_ticker = next((t for t, p, _ in ticker_rows if p == 1), None)
-        # Fallback: when none flagged primary (xref pre-dates is_primary), pick
-        # shortest+alpha-first.
         if primary_ticker is None and ticker_rows:
             primary_ticker = ticker_rows[0][0]
         secondary_tickers = [t for t, p, _ in ticker_rows if t != primary_ticker]
 
-        # DEI scalars (latest per tag across related CIKs).  Only tags
-        # with high coverage (>=90% of submissions) included.
         DEI_TAGS = (
             "EntitySicCode",
             "EntitySicDescription",
@@ -886,7 +809,6 @@ def company_profile(
         )
         dei = {tag: {"val": val, "val_text": val_text, "end": end} for tag, val, val_text, end in dei_rows}
 
-        # Period range from standardized_statements (latest = "as-of").
         period_row = _row(
             sess,
             f"""
@@ -899,9 +821,6 @@ def company_profile(
         if period_row and period_row[0] is not None:
             first_period, latest_period = period_row
 
-        # Submissions: exchanges only (address fields dropped — too patchy
-        # across the universe; major listings like Shell have null
-        # addresses.business.stateOrCountry).
         sub = load_submissions(primary_cik, db_path)
         exchanges_raw = (sub.get("exchanges") if sub else None) or []
         seen_ex: set = set()
@@ -946,12 +865,6 @@ def load_submissions(
     cik: str,
     db_path: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return the full submissions JSON payload for a CIK (gzip-decompressed).
-
-    The payload is stored as gzip-compressed JSON in a ``String`` column.
-    The stored payload is base64-decoded and gzip-decompressed before JSON
-    parsing.
-    """
     cik_padded = _zpad_cik(cik)
     sess = _session(db_path)
     try:
@@ -1030,12 +943,6 @@ def top_companies_by_metric(
     cik_filter: str | None = None,
     db_path: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Top N companies by a standardized line item.
-
-    frequency='annual' uses the most recent full-year period (default).
-    frequency=None uses the most recent period regardless of quarterly/annual.
-    All values converted to USD via nearest prior ECB exchange rate.
-    """
     sess = _session(db_path)
     try:
         where_sql = _standardized_where_clause(
@@ -1129,7 +1036,6 @@ def top_companies_by_sum(
     cik_filter: str | None = None,
     db_path: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Rank companies by the sum of two tags (e.g. FCF = OCF + capex where capex is negative)."""
     sess = _session(db_path)
     where_a = _standardized_where_clause(statement=statement, tag=tag_a, frequency="annual")
     where_b = _standardized_where_clause(statement=statement, tag=tag_b, frequency="annual")

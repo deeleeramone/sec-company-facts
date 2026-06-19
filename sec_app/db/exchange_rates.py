@@ -1,11 +1,3 @@
-"""Fetch and manage historical exchange rates via ECB API.
-
-European Central Bank (ECB) provides free historical daily exchange rates:
-https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml
-
-Rates are EUR to various currencies; we invert to get rates vs USD.
-"""
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -19,15 +11,6 @@ def load_exchange_rates(
     conn,
     lookback_days: int = 3650,
 ) -> None:
-    """Load historical exchange rates from ECB into the local store.
-
-    Args:
-        lookback_days: How far back to fetch rates (default 10 years).
-
-    Fetches daily rates from ECB API (EUR-based), converts to USD-based rates,
-    and inserts into exchange_rates table. ECB rates are EUR to other currencies;
-    we store "from_currency to USD" for universe aggregations.
-    """
     from xml.etree import ElementTree as ET
 
     cutoff_date = datetime.now().date() - timedelta(days=lookback_days)
@@ -117,10 +100,6 @@ def load_exchange_rates(
     print(f"Inserting {len(rate_rows)} exchange rate records into exchange_rates...", flush=True)
     rows_as_tuples = [(r["rate_date"], r["from_currency"], r["to_currency"], r["rate"]) for r in rate_rows]
 
-    # The connection is already on the target database, so use the bare table
-    # name — a "<schema>." prefix resolves to a non-existent database on Dolt.
-    # Replace atomically (delete only after the fetch above succeeded) and insert
-    # in packet-sized batches so a large reload doesn't exceed max_allowed_packet.
     insert_sql = "INSERT INTO exchange_rates (rate_date, from_currency, to_currency, rate) VALUES (?, ?, ?, ?)"
     batch = 5000
     conn.begin()

@@ -1,5 +1,3 @@
-"""Local DuckDB store for SEC company facts and ticker/CIK cross-references."""
-
 from sec_app.db.query import (
     company_profile,
     list_companies_with_financials,

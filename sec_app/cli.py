@@ -1,11 +1,3 @@
-"""CLI: ingest SEC bulk data into Dolt.
-
-Examples
---------
-    # Just refresh the cross-reference tables from SEC's small index files
-    python -m sec_app.cli --skip-facts --skip-submissions
-"""
-
 from __future__ import annotations
 
 import argparse

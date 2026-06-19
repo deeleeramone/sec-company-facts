@@ -1,26 +1,14 @@
-"""DB-backed standardized financials for the serving layer.
-
-Mirrors the provider's ``get_standardized_financials`` signature but sources data
-from the local Dolt store: the precomputed ``standardized_statements`` table when
-available (fast, no re-standardization), with a fallback to resolving raw company
-facts through the provider's pure standardization engine.
-
-``sec_app.server`` rebinds the provider symbol to this implementation at startup,
-so the openbb-sec fetchers (which import ``get_standardized_financials`` at call
-time) serve from the DB instead of re-fetching/standardizing per request.
-"""
-
 from __future__ import annotations
 
 from openbb_core.app.model.abstract.error import OpenBBError
-from openbb_sec.utils.company_facts import (  # provider (PyPI): pure standardization
+from openbb_sec.utils.company_facts import (
     MULTI_CIK_TICKERS,
     StandardizedStatements,
     _schema,
     resolve_company_facts,
 )
 
-from sec_app.db.query import (  # serving (local): Dolt reads
+from sec_app.db.query import (
     load_company_facts,
     load_standardized_statements,
     resolve_symbol,
@@ -36,7 +24,6 @@ async def get_standardized_financials(
     pit_mode: bool = False,
     include_preliminary: bool = False,
 ) -> StandardizedStatements:
-    """Standardized statements served from the local Dolt store."""
     if symbol and not cik:
         resolved = resolve_symbol(symbol)
         cik = resolved[0] if resolved else None
@@ -56,13 +43,11 @@ async def get_standardized_financials(
     if not cik_list:
         raise OpenBBError("Either symbol or cik must be provided.")
 
-    # Fast path: precomputed annual/quarterly table (no re-standardization).
     if not pit_mode and not include_preliminary and not fiscal_years:
         prebuilt = load_standardized_statements(cik_list, period)
         if prebuilt is not None:
             return prebuilt
 
-    # Fallback: resolve from raw facts via the provider's pure engine.
     responses = [load_company_facts(c) for c in cik_list]
     if len(responses) == 1:
         facts_json = responses[0]
