@@ -87,6 +87,10 @@ jobs:
       - name: Rebuild GICS classification table (cik_gics)
         run: python -m sec_app.rebuild_gics
 
+      - name: Garbage collect repository
+        working-directory: sec_company_facts
+        run: dolt gc --full
+
       - name: Commit and push to DoltHub via SQL
         if: ${{ ! inputs.skip_push }}
         env:
