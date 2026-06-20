@@ -476,13 +476,13 @@
         "showAll": true,
         "columnsDefs": [
           {
-            "field": "Industry",
-            "headerName": "Industry",
+            "field": "Sub-Industry",
+            "headerName": "Sub-Industry",
             "cellDataType": "text"
           },
           {
-            "field": "Sub-Industry",
-            "headerName": "Sub-Industry",
+            "field": "Industry",
+            "headerName": "Industry",
             "cellDataType": "text"
           },
           {

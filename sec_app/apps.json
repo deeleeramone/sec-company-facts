@@ -159,6 +159,26 @@
         "sec_income_statement",
         "sec_cash_flow"
       ]
+    },
+    {
+      "name": "Sector",
+      "type": "endpointParam",
+      "paramName": "sector",
+      "defaultValue": null,
+      "widgetIds": [
+        "sec_top_companies",
+        "sec_sector_aggregates"
+      ]
+    },
+    {
+      "name": "Industry",
+      "type": "endpointParam",
+      "paramName": "industry",
+      "defaultValue": null,
+      "widgetIds": [
+        "sec_top_companies",
+        "sec_sector_aggregates"
+      ]
     }
   ]
 }

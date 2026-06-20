@@ -10,7 +10,7 @@ packages = [{ include = "sec_app" }]
 [tool.poetry.dependencies]
 python = ">=3.10,<4"
 # The SEC provider (models/fetchers + company-facts standardization) comes from PyPI.
-openbb-sec = ">=1.6.1"
+openbb-sec = ">=1.6.2"
 fastapi = ">=0.110"
 uvicorn = { version = ">=0.30", extras = ["standard"] }
 pymysql = "^1.1"

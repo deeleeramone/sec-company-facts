@@ -254,8 +254,7 @@ def list_company_choices(
                     SELECT f.cik, f.val_text,
                            row_number() OVER (PARTITION BY f.cik ORDER BY f.`end` DESC) AS rn
                       FROM {DATABASE_NAME}.facts_enc f
-                      JOIN {DATABASE_NAME}.xbrl_tags x ON x.tag_id = f.tag_id
-                     WHERE x.namespace='dei' AND x.tag='EntitySicDescription'
+                     WHERE f.tag_id = (SELECT tag_id FROM {DATABASE_NAME}.xbrl_tags WHERE namespace='dei' AND tag='EntitySicDescription')
                   ) AS s
                  WHERE rn = 1
             )
@@ -954,6 +953,7 @@ def top_companies_by_metric(
             tag=tag,
             frequency=frequency,
         )
+        where_sql += " AND s.period_ending >= CURRENT_DATE - INTERVAL 2 YEAR"
         if cik_filter:
             where_sql += f" AND s.cik IN ({cik_filter})"
         sign = "-1.0" if negate else "1.0"
@@ -1043,7 +1043,7 @@ def top_companies_by_sum(
     sess = _session(db_path)
     where_a = _standardized_where_clause(statement=statement, tag=tag_a, frequency="annual")
     where_b = _standardized_where_clause(statement=statement, tag=tag_b, frequency="annual")
-    _recent = ""
+    _recent = " AND s.period_ending >= CURRENT_DATE - INTERVAL 2 YEAR"
     where_a += _recent
     where_b += _recent
     if cik_filter:
@@ -1170,7 +1170,7 @@ def top_companies_by_ratio(
     denom_stmt = denominator_statement if denominator_statement is not None else statement
     num_where = _standardized_where_clause(statement=statement, tag=numerator_tag, frequency="annual")
     denom_where = _standardized_where_clause(statement=denom_stmt, tag=denominator_tag, frequency="annual")
-    _recent = ""
+    _recent = " AND s.period_ending >= CURRENT_DATE - INTERVAL 2 YEAR"
     num_where += _recent
     denom_where += _recent
     if cik_filter:
