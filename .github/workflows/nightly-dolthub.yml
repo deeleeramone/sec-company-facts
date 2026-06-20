@@ -84,6 +84,9 @@ jobs:
       - name: Run the SEC update
         run: python -m sec_app.run_pipeline --update
 
+      - name: Rebuild GICS classification table (cik_gics)
+        run: python -m sec_app.rebuild_gics
+
       - name: Commit and push to DoltHub via SQL
         if: ${{ ! inputs.skip_push }}
         env:

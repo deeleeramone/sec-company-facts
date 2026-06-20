@@ -6,6 +6,7 @@ from typing import Any
 
 from openbb_core.app.model.abstract.error import OpenBBError
 
+from sec_app.db.cache import dolt_cached
 from sec_app.db.schema import DATABASE_NAME
 
 
@@ -215,6 +216,7 @@ def load_standardized_statements(
     )
 
 
+@dolt_cached
 def list_companies_with_financials(
     db_path: str | None = None,
 ) -> list[dict[str, str]]:
@@ -237,6 +239,7 @@ def list_companies_with_financials(
     return [{"label": name, "value": ticker} for ticker, name in rows]
 
 
+@dolt_cached
 def list_company_choices(
     db_path: str | None = None,
 ) -> list[dict]:
@@ -933,6 +936,7 @@ def _latest_standardized_period(
     return row[0].isoformat()
 
 
+@dolt_cached
 def top_companies_by_metric(
     statement: str,
     tag: str,
@@ -1026,6 +1030,7 @@ def top_companies_by_metric(
     ]
 
 
+@dolt_cached
 def top_companies_by_sum(
     statement: str,
     tag_a: str,
@@ -1147,6 +1152,7 @@ def top_companies_by_sum(
     ]
 
 
+@dolt_cached
 def top_companies_by_ratio(
     statement: str,
     numerator_tag: str,

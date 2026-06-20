@@ -1,151 +1,370 @@
 from __future__ import annotations
 
+import time
 from statistics import median
 from typing import Any
 
+from sec_app.db.cache import dolt_cached
 from sec_app.db.query import _q, _rows, _session
 
 _SIC_CODE_SUBQ = "(SELECT tag_id FROM xbrl_tags WHERE namespace='dei' AND tag='EntitySicCode')"
 
-_CANNABIS_NAME_TERMS = ["cannabis", "marijuana", "marihuana", "cannabin", "hemp"]
-_CANNABIS_TICKERS = [
-    "CURLF", "TCNNF", "CRLBF", "VRNO", "GTBIF", "TSNDF", "AAWH", "AYRWF", "JUSHF",
-    "MRMD", "CXXIF", "GLASF", "CGC", "TLRY", "ACB", "CRON", "SNDL", "OGI", "VFF",
-    "CWBHF", "PLNH", "GRUSF", "VREOF", "ITHUF", "ACRHF", "LOWLF", "MMNFF",
-]
-
-_HEALTHCARE_4D: dict[int, str] = {
-    2834: "Pharmaceuticals",
-    2836: "Biotechnology",
-    2835: "Life Sciences Tools & Diagnostics",
-    3826: "Life Sciences Tools & Diagnostics",
-    8731: "Life Sciences Tools & Diagnostics",
-    8734: "Life Sciences Tools & Diagnostics",
-    3841: "Medical Devices & Equipment",
-    3842: "Medical Devices & Equipment",
-    3843: "Medical Devices & Equipment",
-    3844: "Medical Devices & Equipment",
-    3845: "Medical Devices & Equipment",
-    3851: "Medical Devices & Equipment",
-    6324: "Managed Care",
-    5122: "Health Care Distributors",
-    5047: "Health Care Distributors",
+_SIC_GICS: dict[str, tuple[str, str]] = {
+    "12": ("Energy", "Coal Mining"),
+    "122": ("Energy", "Bituminous Coal & Lignite Mining"),
+    "13": ("Energy", "Oil & Gas Extraction"),
+    "131": ("Energy", "Crude Petroleum & Natural Gas"),
+    "138": ("Energy", "Oil & Gas Field Services"),
+    "29": ("Energy", "Petroleum Refining"),
+    "291": ("Energy", "Petroleum Refining"),
+    "299": ("Energy", "Miscellaneous Petroleum & Coal Products"),
+    "46": ("Energy", "Pipelines"),
+    "461": ("Energy", "Pipelines"),
+    "517": ("Energy", "Petroleum & Petroleum Products"),
+    "08": ("Materials", "Forestry"),
+    "10": ("Materials", "Metal Mining"),
+    "104": ("Materials", "Gold & Silver Mining"),
+    "109": ("Materials", "Miscellaneous Metal Ore Mining"),
+    "14": ("Materials", "Nonmetallic Minerals Mining"),
+    "24": ("Materials", "Lumber & Wood Products"),
+    "242": ("Materials", "Sawmills & Planing Mills"),
+    "243": ("Materials", "Millwork, Veneer & Plywood"),
+    "245": ("Materials", "Wood Buildings & Mobile Homes"),
+    "26": ("Materials", "Paper & Allied Products"),
+    "261": ("Materials", "Pulp Mills"),
+    "262": ("Materials", "Paper Mills"),
+    "263": ("Materials", "Paperboard Mills"),
+    "265": ("Materials", "Paperboard Containers & Boxes"),
+    "267": ("Materials", "Converted Paper Products"),
+    "27": ("Industrials", "Commercial Printing"),
+    "271": ("Communication Services", "Publishing - Newspapers"),
+    "272": ("Communication Services", "Publishing - Periodicals"),
+    "273": ("Communication Services", "Publishing - Books"),
+    "274": ("Communication Services", "Publishing - Miscellaneous"),
+    "275": ("Industrials", "Commercial Printing"),
+    "276": ("Industrials", "Manifold Business Forms"),
+    "277": ("Industrials", "Greeting Cards"),
+    "278": ("Industrials", "Bookbinding"),
+    "279": ("Industrials", "Printing Trade Services"),
+    "281": ("Materials", "Industrial Inorganic Chemicals"),
+    "282": ("Materials", "Plastics Materials & Synthetic Resins"),
+    "285": ("Materials", "Paints & Coatings"),
+    "286": ("Materials", "Industrial Organic Chemicals"),
+    "287": ("Materials", "Agricultural Chemicals"),
+    "289": ("Materials", "Miscellaneous Chemical Products"),
+    "30": ("Materials", "Rubber & Plastics Products"),
+    "301": ("Consumer Discretionary", "Tires & Rubber"),
+    "302": ("Materials", "Rubber & Plastics Footwear"),
+    "305": ("Materials", "Gaskets, Packing & Sealing Devices"),
+    "306": ("Materials", "Fabricated Rubber Products"),
+    "308": ("Materials", "Miscellaneous Plastics Products"),
+    "32": ("Materials", "Stone, Clay & Glass Products"),
+    "321": ("Materials", "Flat Glass"),
+    "322": ("Materials", "Glass & Glassware"),
+    "323": ("Materials", "Glass Products"),
+    "324": ("Materials", "Cement, Hydraulic"),
+    "326": ("Materials", "Pottery & Related Products"),
+    "327": ("Materials", "Concrete, Gypsum & Plaster"),
+    "328": ("Materials", "Cut Stone & Stone Products"),
+    "329": ("Materials", "Abrasive & Asbestos Products"),
+    "33": ("Materials", "Primary Metal Industries"),
+    "331": ("Materials", "Steel Works & Rolling Mills"),
+    "332": ("Materials", "Iron & Steel Foundries"),
+    "333": ("Materials", "Primary Smelting of Nonferrous Metals"),
+    "334": ("Materials", "Secondary Smelting of Nonferrous Metals"),
+    "335": ("Materials", "Rolling & Drawing of Nonferrous Metals"),
+    "336": ("Materials", "Nonferrous Foundries"),
+    "339": ("Materials", "Miscellaneous Primary Metal Products"),
+    "503": ("Materials", "Lumber & Construction Materials Wholesale"),
+    "505": ("Materials", "Metals & Minerals Wholesale"),
+    "511": ("Materials", "Paper & Paper Products Wholesale"),
+    "516": ("Materials", "Chemicals Wholesale"),
+    "52": ("Consumer Discretionary", "Building Materials & Garden Retail"),
+    "521": ("Consumer Discretionary", "Lumber & Building Materials Dealers"),
+    "07": ("Industrials", "Agricultural Services"),
+    "15": ("Industrials", "Building Construction"),
+    "152": ("Industrials", "Residential Building Construction"),
+    "153": ("Industrials", "Operative Builders"),
+    "154": ("Industrials", "Nonresidential Building Construction"),
+    "16": ("Industrials", "Heavy Construction"),
+    "162": ("Industrials", "Heavy Construction, Except Highway"),
+    "17": ("Industrials", "Construction Special Trade Contractors"),
+    "173": ("Industrials", "Electrical Work"),
+    "351": ("Industrials", "Engines & Turbines"),
+    "352": ("Industrials", "Farm & Garden Machinery"),
+    "353": ("Industrials", "Construction & Materials Handling Machinery"),
+    "354": ("Industrials", "Metalworking Machinery"),
+    "355": ("Industrials", "Special Industry Machinery"),
+    "356": ("Industrials", "General Industrial Machinery"),
+    "358": ("Industrials", "Refrigeration & Service Machinery"),
+    "359": ("Industrials", "Miscellaneous Industrial Machinery"),
+    "361": ("Industrials", "Electric Transmission & Distribution Equipment"),
+    "362": ("Industrials", "Electrical Industrial Apparatus"),
+    "364": ("Industrials", "Electric Lighting & Wiring Equipment"),
+    "369": ("Industrials", "Miscellaneous Electrical Machinery"),
+    "372": ("Industrials", "Aircraft & Parts"),
+    "376": ("Industrials", "Guided Missiles & Space Vehicles"),
+    "379": ("Industrials", "Miscellaneous Transportation Equipment"),
+    "381": ("Industrials", "Navigation & Guidance Instruments"),
+    "382": ("Industrials", "Laboratory & Analytical Instruments"),
+    "40": ("Industrials", "Railroad Transportation"),
+    "401": ("Industrials", "Railroads"),
+    "41": ("Industrials", "Local & Suburban Transit"),
+    "42": ("Industrials", "Trucking & Warehousing"),
+    "421": ("Industrials", "Trucking & Courier Services"),
+    "422": ("Industrials", "Public Warehousing & Storage"),
+    "44": ("Industrials", "Water Transportation"),
+    "441": ("Industrials", "Deep Sea Freight Transportation"),
+    "45": ("Industrials", "Air Transportation"),
+    "451": ("Industrials", "Air Transportation, Scheduled"),
+    "452": ("Industrials", "Air Transportation, Nonscheduled"),
+    "458": ("Industrials", "Airports & Terminal Services"),
+    "47": ("Industrials", "Transportation Services"),
+    "473": ("Industrials", "Freight Transportation Arrangement"),
+    "504": ("Industrials", "Professional & Commercial Equipment Wholesale"),
+    "506": ("Industrials", "Electrical Goods Wholesale"),
+    "507": ("Industrials", "Hardware & Plumbing Wholesale"),
+    "508": ("Industrials", "Machinery & Equipment Wholesale"),
+    "509": ("Industrials", "Miscellaneous Durable Goods Wholesale"),
+    "731": ("Communication Services", "Advertising"),
+    "732": ("Industrials", "Consumer Credit Reporting"),
+    "733": ("Industrials", "Mailing, Reproduction & Commercial Art"),
+    "87": ("Industrials", "Engineering, Accounting & Management Services"),
+    "871": ("Industrials", "Engineering & Architectural Services"),
+    "873": ("Industrials", "Research, Development & Testing Services"),
+    "874": ("Industrials", "Management & Public Relations Services"),
+    "22": ("Consumer Discretionary", "Textile Mill Products"),
+    "221": ("Consumer Discretionary", "Broadwoven Fabric Mills, Cotton"),
+    "222": ("Consumer Discretionary", "Broadwoven Fabric Mills, Manmade Fiber"),
+    "225": ("Consumer Discretionary", "Knitting Mills"),
+    "227": ("Consumer Discretionary", "Carpets & Rugs"),
+    "25": ("Consumer Discretionary", "Furniture & Fixtures"),
+    "251": ("Consumer Discretionary", "Household Furniture"),
+    "252": ("Consumer Discretionary", "Office Furniture"),
+    "253": ("Consumer Discretionary", "Public Building Furniture"),
+    "254": ("Consumer Discretionary", "Partitions & Office Fixtures"),
+    "259": ("Consumer Discretionary", "Miscellaneous Furniture & Fixtures"),
+    "314": ("Consumer Discretionary", "Footwear, Except Rubber"),
+    "34": ("Consumer Discretionary", "Fabricated Metal Products"),
+    "341": ("Consumer Discretionary", "Metal Cans & Shipping Containers"),
+    "342": ("Consumer Discretionary", "Cutlery, Handtools & Hardware"),
+    "343": ("Consumer Discretionary", "Heating Equipment & Plumbing Fixtures"),
+    "344": ("Consumer Discretionary", "Fabricated Structural Metal Products"),
+    "345": ("Consumer Discretionary", "Screw Machine Products & Fasteners"),
+    "346": ("Consumer Discretionary", "Metal Forgings & Stampings"),
+    "347": ("Consumer Discretionary", "Coating, Engraving & Allied Services"),
+    "348": ("Consumer Discretionary", "Ordnance & Accessories"),
+    "349": ("Consumer Discretionary", "Miscellaneous Fabricated Metal Products"),
+    "363": ("Consumer Discretionary", "Household Appliances"),
+    "365": ("Consumer Discretionary", "Household Audio & Video Equipment"),
+    "371": ("Consumer Discretionary", "Motor Vehicles & Equipment"),
+    "373": ("Industrials", "Ship & Boat Building"),
+    "374": ("Industrials", "Railroad Equipment"),
+    "375": ("Consumer Discretionary", "Motorcycles, Bicycles & Parts"),
+    "501": ("Consumer Discretionary", "Motor Vehicles & Parts Wholesale"),
+    "502": ("Consumer Discretionary", "Furniture & Home Furnishings Wholesale"),
+    "553": ("Consumer Discretionary", "Auto & Home Supply Stores"),
+    "562": ("Consumer Discretionary", "Women's Clothing Stores"),
+    "565": ("Consumer Discretionary", "Family Clothing Stores"),
+    "566": ("Consumer Discretionary", "Shoe Stores"),
+    "571": ("Consumer Discretionary", "Home Furnishings Stores"),
+    "70": ("Consumer Discretionary", "Hotels & Lodging"),
+    "701": ("Consumer Discretionary", "Hotels & Motels"),
+    "751": ("Consumer Discretionary", "Automotive Rental & Leasing"),
+    "781": ("Communication Services", "Movies & Entertainment"),
+    "782": ("Communication Services", "Movies & Entertainment"),
+    "783": ("Communication Services", "Movies & Entertainment"),
+    "784": ("Communication Services", "Movies & Entertainment"),
+    "794": ("Communication Services", "Sports & Entertainment"),
+    "799": ("Consumer Discretionary", "Amusement & Recreation Services"),
+    "811": ("Consumer Discretionary", "Legal Services"),
+    "82": ("Consumer Discretionary", "Educational Services"),
+    "01": ("Consumer Staples", "Agricultural Production - Crops"),
+    "02": ("Consumer Staples", "Agricultural Production - Livestock"),
+    "09": ("Consumer Staples", "Fishing, Hunting & Trapping"),
+    "20": ("Consumer Staples", "Food & Kindred Products"),
+    "201": ("Consumer Staples", "Meat Products"),
+    "202": ("Consumer Staples", "Dairy Products"),
+    "203": ("Consumer Staples", "Canned & Preserved Fruits & Vegetables"),
+    "204": ("Consumer Staples", "Grain Mill Products"),
+    "205": ("Consumer Staples", "Bakery Products"),
+    "206": ("Consumer Staples", "Sugar & Confectionery Products"),
+    "207": ("Consumer Staples", "Fats & Oils"),
+    "208": ("Consumer Staples", "Beverages"),
+    "209": ("Consumer Staples", "Miscellaneous Food Preparations"),
+    "21": ("Consumer Staples", "Tobacco Products"),
+    "211": ("Consumer Staples", "Cigarettes"),
+    "23": ("Consumer Discretionary", "Apparel, Accessories & Luxury Goods"),
+    "232": ("Consumer Discretionary", "Apparel - Men's & Boys'"),
+    "233": ("Consumer Discretionary", "Apparel - Women's & Misses'"),
+    "234": ("Consumer Discretionary", "Apparel - Women's & Children's"),
+    "239": ("Consumer Discretionary", "Textile Products"),
+    "513": ("Consumer Staples", "Apparel & Piece Goods Wholesale"),
+    "514": ("Consumer Staples", "Groceries & Related Products Wholesale"),
+    "515": ("Consumer Staples", "Farm-Product Raw Materials Wholesale"),
+    "518": ("Consumer Staples", "Beer, Wine & Distilled Beverages Wholesale"),
+    "519": ("Consumer Staples", "Miscellaneous Nondurable Goods Wholesale"),
+    "53": ("Consumer Staples", "General Merchandise Stores"),
+    "531": ("Consumer Staples", "Department Stores"),
+    "533": ("Consumer Staples", "Variety Stores"),
+    "539": ("Consumer Staples", "Miscellaneous General Merchandise Stores"),
+    "54": ("Consumer Staples", "Food Stores"),
+    "541": ("Consumer Staples", "Grocery Stores"),
+    "283": ("Health Care", "Drugs"),
+    "384": ("Health Care", "Surgical & Medical Instruments"),
+    "385": ("Health Care", "Ophthalmic Goods"),
+    "512": ("Health Care", "Drugs & Druggists' Sundries Wholesale"),
+    "80": ("Health Care", "Health Services"),
+    "801": ("Health Care", "Offices & Clinics of Medical Doctors"),
+    "805": ("Health Care", "Nursing & Personal Care Facilities"),
+    "806": ("Health Care", "Hospitals"),
+    "807": ("Health Care", "Medical & Dental Laboratories"),
+    "808": ("Health Care", "Home Health Care Services"),
+    "809": ("Health Care", "Miscellaneous Health Services"),
+    "60": ("Financials", "Depository Institutions"),
+    "602": ("Financials", "Commercial Banks"),
+    "603": ("Financials", "Savings Institutions"),
+    "609": ("Financials", "Functions Related to Depository Banking"),
+    "61": ("Financials", "Nondepository Credit Institutions"),
+    "611": ("Financials", "Federal Credit Agencies"),
+    "614": ("Financials", "Personal Credit Institutions"),
+    "615": ("Financials", "Business Credit Institutions"),
+    "616": ("Financials", "Mortgage Bankers & Brokers"),
+    "618": ("Financials", "Asset-Backed Securities"),
+    "62": ("Financials", "Security & Commodity Brokers"),
+    "621": ("Financials", "Security Brokers & Dealers"),
+    "622": ("Financials", "Commodity Contracts Brokers & Dealers"),
+    "628": ("Financials", "Services Allied with Securities Exchange"),
+    "63": ("Financials", "Insurance Carriers"),
+    "631": ("Financials", "Life Insurance"),
+    "632": ("Financials", "Accident & Health Insurance"),
+    "633": ("Financials", "Fire, Marine & Casualty Insurance"),
+    "635": ("Financials", "Surety Insurance"),
+    "636": ("Financials", "Title Insurance"),
+    "639": ("Financials", "Insurance Carriers, NEC"),
+    "64": ("Financials", "Insurance Agents & Brokers"),
+    "641": ("Financials", "Insurance Agents & Brokers"),
+    "67": ("Financials", "Holding & Other Investment Offices"),
+    "677": ("Financials", "Blank Checks"),
+    "679": ("Financials", "Miscellaneous Investing"),
+    "357": ("Information Technology", "Technology Hardware, Storage & Peripherals"),
+    "367": ("Information Technology", "Electronic Equipment, Instruments & Components"),
+    "366": ("Information Technology", "Communications Equipment"),
+    "48": ("Communication Services", "Communications"),
+    "481": ("Communication Services", "Telephone Communications"),
+    "482": ("Communication Services", "Telegraph & Message Communications"),
+    "483": ("Communication Services", "Radio & TV Broadcasting"),
+    "484": ("Communication Services", "Cable & Pay Television"),
+    "489": ("Communication Services", "Communications Services, NEC"),
+    "49": ("Utilities", "Electric, Gas & Sanitary Services"),
+    "491": ("Utilities", "Electric Services"),
+    "492": ("Utilities", "Gas Production & Distribution"),
+    "493": ("Utilities", "Combination Utility Services"),
+    "494": ("Utilities", "Water Supply"),
+    "495": ("Utilities", "Sanitary Services"),
+    "65": ("Real Estate", "Real Estate"),
+    "651": ("Real Estate", "Real Estate Operators & Lessors"),
+    "653": ("Real Estate", "Real Estate Agents & Managers"),
+    "655": ("Real Estate", "Land Subdividers & Developers"),
+    "737": ("Information Technology", "IT Services"),
+    "386": ("Information Technology", "Electronic Equipment, Instruments & Components"),
+    "591": ("Consumer Staples", "Drug Stores"),
+    "284": ("Consumer Staples", "Soap, Cleaners & Cosmetics"),
+    "596": ("Consumer Discretionary", "Nonstore Retailers"),
+    "835": ("Consumer Discretionary", "Child Day Care Services"),
+    "387": ("Consumer Discretionary", "Watches, Clocks & Jewelry"),
+    "836": ("Health Care", "Residential Care"),
+    "399": ("Materials", "Miscellaneous Manufacturing"),
+    "28": ("Materials", "Chemicals & Allied Products"),
+    "31": ("Consumer Discretionary", "Leather & Leather Products"),
+    "35": ("Industrials", "Industrial & Commercial Machinery"),
+    "36": ("Industrials", "Electronic & Electrical Equipment"),
+    "37": ("Consumer Discretionary", "Transportation Equipment"),
+    "38": ("Industrials", "Measuring & Analyzing Instruments"),
+    "39": ("Consumer Discretionary", "Miscellaneous Manufacturing"),
+    "50": ("Industrials", "Durable Goods Wholesale"),
+    "51": ("Consumer Staples", "Nondurable Goods Wholesale"),
+    "55": ("Consumer Discretionary", "Automotive Dealers"),
+    "56": ("Consumer Discretionary", "Apparel & Accessory Stores"),
+    "57": ("Consumer Discretionary", "Home Furnishings & Electronics Stores"),
+    "58": ("Consumer Discretionary", "Eating & Drinking Places"),
+    "59": ("Consumer Discretionary", "Miscellaneous Retail"),
+    "72": ("Consumer Discretionary", "Personal Services"),
+    "73": ("Industrials", "Business Services"),
+    "75": ("Consumer Discretionary", "Automotive Services"),
+    "76": ("Industrials", "Miscellaneous Repair Services"),
+    "79": ("Consumer Discretionary", "Amusement & Recreation Services"),
+    "83": ("Health Care", "Social Services"),
+    "86": ("Industrials", "Membership Organizations"),
+    "89": ("Industrials", "Services, NEC"),
+    "7370": ("Information Technology", "IT Services"),
+    "7371": ("Information Technology", "IT Services"),
+    "7372": ("Information Technology", "Software"),
+    "7373": ("Information Technology", "IT Services"),
+    "7374": ("Information Technology", "IT Services"),
+    "7375": ("Information Technology", "IT Services"),
+    "7377": ("Information Technology", "IT Services"),
+    "7379": ("Information Technology", "IT Services"),
+    "3571": ("Information Technology", "Technology Hardware, Storage & Peripherals"),
+    "3572": ("Information Technology", "Technology Hardware, Storage & Peripherals"),
+    "3577": ("Information Technology", "Technology Hardware, Storage & Peripherals"),
+    "3578": ("Information Technology", "Technology Hardware, Storage & Peripherals"),
+    "3576": ("Information Technology", "Communications Equipment"),
+    "3674": ("Information Technology", "Semiconductors & Semiconductor Equipment"),
+    "3559": ("Information Technology", "Semiconductors & Semiconductor Equipment"),
+    "6798": ("Real Estate", "Equity REITs"),
+    "4953": ("Industrials", "Environmental & Facilities Services"),
 }
 
-_MAJOR_GROUP: dict[int, tuple[str, str]] = {
-    1: ("Agriculture", "Crops"),
-    2: ("Agriculture", "Livestock"),
-    7: ("Agriculture", "Agricultural Services"),
-    8: ("Agriculture", "Forestry"),
-    9: ("Agriculture", "Fishing, Hunting & Trapping"),
-    10: ("Mining & Extraction", "Metal Mining"),
-    12: ("Mining & Extraction", "Coal Mining"),
-    13: ("Mining & Extraction", "Oil & Gas Extraction"),
-    14: ("Mining & Extraction", "Nonmetallic Minerals Mining"),
-    15: ("Construction", "Building Construction"),
-    16: ("Construction", "Heavy Construction"),
-    17: ("Construction", "Special Trade Contractors"),
-    20: ("Manufacturing", "Food & Beverage"),
-    21: ("Manufacturing", "Tobacco"),
-    22: ("Manufacturing", "Textiles"),
-    23: ("Manufacturing", "Apparel"),
-    24: ("Manufacturing", "Lumber & Wood"),
-    25: ("Manufacturing", "Furniture & Fixtures"),
-    26: ("Manufacturing", "Paper"),
-    27: ("Manufacturing", "Printing & Publishing"),
-    28: ("Manufacturing", "Chemicals"),
-    29: ("Manufacturing", "Petroleum Refining"),
-    30: ("Manufacturing", "Rubber & Plastics"),
-    31: ("Manufacturing", "Leather & Footwear"),
-    32: ("Manufacturing", "Stone, Clay & Glass"),
-    33: ("Manufacturing", "Primary Metals"),
-    34: ("Manufacturing", "Fabricated Metal"),
-    35: ("Manufacturing", "Machinery & Computer Equipment"),
-    36: ("Manufacturing", "Electronics & Electrical Equipment"),
-    37: ("Manufacturing", "Transportation Equipment"),
-    38: ("Manufacturing", "Instruments"),
-    39: ("Manufacturing", "Miscellaneous Manufacturing"),
-    40: ("Transportation & Utilities", "Railroads"),
-    41: ("Transportation & Utilities", "Transit & Ground Passenger"),
-    42: ("Transportation & Utilities", "Trucking & Warehousing"),
-    44: ("Transportation & Utilities", "Water Transportation"),
-    45: ("Transportation & Utilities", "Air Transportation"),
-    46: ("Transportation & Utilities", "Pipelines"),
-    47: ("Transportation & Utilities", "Transportation Services"),
-    48: ("Transportation & Utilities", "Communications"),
-    49: ("Transportation & Utilities", "Utilities"),
-    50: ("Wholesale Trade", "Durable Goods"),
-    51: ("Wholesale Trade", "Nondurable Goods"),
-    52: ("Retail Trade", "Building Materials & Garden"),
-    53: ("Retail Trade", "General Merchandise"),
-    54: ("Retail Trade", "Food Stores"),
-    55: ("Retail Trade", "Automotive Dealers"),
-    56: ("Retail Trade", "Apparel & Accessory Stores"),
-    57: ("Retail Trade", "Furniture & Home Furnishings"),
-    58: ("Retail Trade", "Eating & Drinking Places"),
-    59: ("Retail Trade", "Miscellaneous Retail"),
-    60: ("Finance, Insurance & Real Estate", "Depository Institutions"),
-    61: ("Finance, Insurance & Real Estate", "Nondepository Credit"),
-    62: ("Finance, Insurance & Real Estate", "Securities & Brokers"),
-    63: ("Finance, Insurance & Real Estate", "Insurance Carriers"),
-    64: ("Finance, Insurance & Real Estate", "Insurance Agents & Brokers"),
-    65: ("Finance, Insurance & Real Estate", "Real Estate"),
-    67: ("Finance, Insurance & Real Estate", "Holding & Investment Offices"),
-    70: ("Services", "Hotels & Lodging"),
-    72: ("Services", "Personal Services"),
-    73: ("Services", "Business Services"),
-    75: ("Services", "Auto Repair & Services"),
-    76: ("Services", "Miscellaneous Repair"),
-    78: ("Services", "Motion Pictures"),
-    79: ("Services", "Amusement & Recreation"),
-    80: ("Services", "Health Services"),
-    81: ("Services", "Legal Services"),
-    82: ("Services", "Educational Services"),
-    83: ("Services", "Social Services"),
-    87: ("Services", "Engineering & Management Services"),
-    89: ("Services", "Services, NEC"),
-    99: ("Other / Nonclassifiable", "Nonclassifiable"),
+_OVERRIDES: dict[str, tuple[str, str]] = {
+    "GOOGL": ("Communication Services", "Interactive Media & Services"),
+    "GOOG": ("Communication Services", "Interactive Media & Services"),
+    "META": ("Communication Services", "Interactive Media & Services"),
+    "PINS": ("Communication Services", "Interactive Media & Services"),
+    "SNAP": ("Communication Services", "Interactive Media & Services"),
+    "MTCH": ("Communication Services", "Interactive Media & Services"),
+    "BMBL": ("Communication Services", "Interactive Media & Services"),
+    "DIS": ("Communication Services", "Movies & Entertainment"),
+    "WBD": ("Communication Services", "Movies & Entertainment"),
+    "V": ("Information Technology", "IT Services"),
+    "MA": ("Information Technology", "IT Services"),
+    "PYPL": ("Information Technology", "IT Services"),
+    "FIS": ("Information Technology", "IT Services"),
+    "FI": ("Information Technology", "IT Services"),
+    "GPN": ("Information Technology", "IT Services"),
 }
 
 
-def _rules() -> list[tuple[str, str, str]]:
-    rules: list[tuple[str, str, str]] = [("can.cik IS NOT NULL", "Agriculture", "Cannabis")]
-
-    by_industry: dict[str, list[int]] = {}
-    for sic, industry in _HEALTHCARE_4D.items():
-        by_industry.setdefault(industry, []).append(sic)
-    for industry, sics in by_industry.items():
-        cond = "c.sic4 IN (%s)" % ",".join(str(s) for s in sorted(sics))
-        rules.append((cond, "Health Care", industry))
-    rules.append(("c.sic4 BETWEEN 8000 AND 8099", "Health Care", "Health Care Providers & Services"))
-
-    for mg, (sector, industry) in sorted(_MAJOR_GROUP.items()):
-        rules.append(("c.sic4 BETWEEN %d AND %d" % (mg * 100, mg * 100 + 99), sector, industry))
-    return rules
-
-
-def _case(which: str) -> str:
-    idx = 1 if which == "sector" else 2
+def _gics_case(which: str) -> str:
+    idx = 0 if which == "sector" else 1
     fallback = "Other / Nonclassifiable" if which == "sector" else "Nonclassifiable"
+    four = [(int(k), v[idx]) for k, v in _SIC_GICS.items() if len(k) == 4]
+    three = [(int(k), v[idx]) for k, v in _SIC_GICS.items() if len(k) == 3]
+    two = [(int(k), v[idx]) for k, v in _SIC_GICS.items() if len(k) == 2]
     lines = ["CASE"]
-    for rule in _rules():
-        lines.append("WHEN %s THEN %s" % (rule[0], _q(rule[idx])))
+    for code, val in four:
+        lines.append("WHEN c.sic4 = %d THEN %s" % (code, _q(val)))
+    for code, val in three:
+        lines.append("WHEN FLOOR(c.sic4 / 10) = %d THEN %s" % (code, _q(val)))
+    for code, val in two:
+        lines.append("WHEN FLOOR(c.sic4 / 100) = %d THEN %s" % (code, _q(val)))
     lines.append("ELSE %s END" % _q(fallback))
     return "\n".join(lines)
 
 
-def _cannabis_subquery() -> str:
-    name_likes = " OR ".join(
-        "LOWER(co.entity_name) LIKE %s" % _q("%" + t + "%") for t in _CANNABIS_NAME_TERMS
-    )
-    tickers_in = ",".join(_q(t) for t in _CANNABIS_TICKERS)
-    return (
-        f"SELECT cik FROM companies co WHERE {name_likes} "
-        f"UNION SELECT cik FROM tickers WHERE ticker IN ({tickers_in})"
-    )
+def _overrides_cte() -> str:
+    sect = "CASE pt.ticker " + " ".join("WHEN %s THEN %s" % (_q(t), _q(v[0])) for t, v in _OVERRIDES.items()) + " END"
+    indu = "CASE pt.ticker " + " ".join("WHEN %s THEN %s" % (_q(t), _q(v[1])) for t, v in _OVERRIDES.items()) + " END"
+    tin = ",".join(_q(t) for t in _OVERRIDES)
+    return f"""overrides AS (
+  SELECT cik, MAX(ovr_sector) AS ovr_sector, MAX(ovr_industry) AS ovr_industry FROM (
+    SELECT pt.cik, {sect} AS ovr_sector, {indu} AS ovr_industry
+    FROM primary_tickers pt WHERE pt.ticker IN ({tin})
+  ) z GROUP BY cik
+)"""
 
 
-def _classify_cte() -> str:
+def _classify_compute_cte() -> str:
     descr_subq = "(SELECT tag_id FROM xbrl_tags WHERE namespace='dei' AND tag='EntitySicDescription')"
     return f"""WITH code AS (
   SELECT cik, CAST(val AS UNSIGNED) AS sic4
@@ -159,21 +378,47 @@ sic_descr AS (
   SELECT cik, val_text AS descr FROM facts_enc
   WHERE tag_id = {descr_subq} AND val_text IS NOT NULL
 ),
-cannabis AS (
-  {_cannabis_subquery()}
-),
+{_overrides_cte()},
 classified AS (
   SELECT c.cik, c.sic4,
-         {_case('sector')} AS sector,
-         {_case('industry')} AS industry,
+         COALESCE(o.ovr_sector, {_gics_case('sector')}) AS sector,
+         COALESCE(o.ovr_industry, {_gics_case('industry')}) AS industry,
          COALESCE(d.descr, CONCAT('SIC ', CAST(c.sic4 AS CHAR))) AS sub_industry
   FROM code c
   JOIN tradeable tk ON tk.cik = c.cik
-  LEFT JOIN cannabis can ON can.cik = c.cik
   LEFT JOIN sic_descr d ON d.cik = c.cik
+  LEFT JOIN overrides o ON o.cik = c.cik
 )"""
 
 
+_cik_gics_checked_at = 0.0
+_cik_gics_present = False
+
+
+def _has_cik_gics() -> bool:
+    global _cik_gics_checked_at, _cik_gics_present
+    now = time.monotonic()
+    if now - _cik_gics_checked_at < 60.0:
+        return _cik_gics_present
+    try:
+        sess = _session()
+        try:
+            _cik_gics_present = sess.execute("SHOW TABLES LIKE 'cik_gics'").fetchone() is not None
+        finally:
+            sess.close()
+    except Exception:
+        _cik_gics_present = False
+    _cik_gics_checked_at = now
+    return _cik_gics_present
+
+
+def _classify_cte() -> str:
+    if _has_cik_gics():
+        return "WITH classified AS (SELECT cik, sic4, sector, industry, sub_industry FROM cik_gics)"
+    return _classify_compute_cte()
+
+
+@dolt_cached
 def cik_in_clause(
     sector: str | None = None,
     industry: str | None = None,
@@ -243,6 +488,7 @@ def _productive_cte() -> str:
 )"""
 
 
+@dolt_cached
 def list_sectors(db_path: str | None = None) -> list[dict[str, Any]]:
     sql = f"{_classify_cte()} SELECT sector, COUNT(*) AS n FROM classified GROUP BY sector ORDER BY n DESC"
     sess = _session(db_path)
@@ -253,6 +499,7 @@ def list_sectors(db_path: str | None = None) -> list[dict[str, Any]]:
     return [{"label": f"{sector} ({n})", "value": sector} for sector, n in rows]
 
 
+@dolt_cached
 def list_industries(sector: str | None = None, db_path: str | None = None) -> list[dict[str, Any]]:
     where = "WHERE sector = %s" % _q(sector) if sector else ""
     sql = (
@@ -270,6 +517,7 @@ def list_industries(sector: str | None = None, db_path: str | None = None) -> li
     ]
 
 
+@dolt_cached
 def sector_industry_aggregates(
     sector: str | None = None,
     industry: str | None = None,
