@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any, Callable
 
-_HASH_TTL = 10.0
+_HASH_TTL = 300.0
 _MAX_ENTRIES = 1024
 
 _cache_lock = threading.Lock()

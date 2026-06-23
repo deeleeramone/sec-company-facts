@@ -248,29 +248,15 @@ def list_company_choices(
         rows = _rows(
             sess,
             f"""
-            WITH sic AS (
-                SELECT cik, val_text AS sic_name
-                  FROM (
-                    SELECT f.cik, f.val_text,
-                           row_number() OVER (PARTITION BY f.cik ORDER BY f.`end` DESC) AS rn
-                      FROM {DATABASE_NAME}.facts_enc f
-                     WHERE f.tag_id = (SELECT tag_id FROM {DATABASE_NAME}.xbrl_tags WHERE namespace='dei' AND tag='EntitySicDescription')
-                  ) AS s
-                 WHERE rn = 1
-            )
-            SELECT pt.ticker        AS ticker,
-                   c.entity_name    AS name,
-                   pt.cik           AS cik,
-                    min(t.`rank`)      AS `rank`,
-                   sic.sic_name     AS sic_name
+            SELECT pt.ticker AS ticker,
+                   c.entity_name AS name,
+                   pt.cik AS cik,
+                   pt.`rank` AS `rank`
               FROM {DATABASE_NAME}.primary_tickers pt
-              JOIN {DATABASE_NAME}.companies        c  ON c.cik  = pt.cik
-                JOIN {DATABASE_NAME}.tickers          t  ON t.cik  = pt.cik AND t.ticker = pt.ticker
-              JOIN {DATABASE_NAME}.processed_ciks   p  ON p.cik  = pt.cik
-              LEFT JOIN sic                            ON sic.cik = pt.cik
+              JOIN {DATABASE_NAME}.companies c ON c.cik = pt.cik
+              JOIN {DATABASE_NAME}.processed_ciks p ON p.cik = pt.cik
              WHERE p.has_balance AND p.has_income AND p.has_cash_flow
-               GROUP BY pt.ticker, c.entity_name, pt.cik, sic.sic_name
-               ORDER BY `rank` ASC, ticker ASC
+             ORDER BY `rank` ASC, ticker ASC
             """,
         )
     finally:
@@ -281,10 +267,10 @@ def list_company_choices(
             "value": ticker,
             "extraInfo": {
                 "description": f"{ticker} | {cik}",
-                "rightOfDescription": sic_name or "",
+                "rightOfDescription": "",
             },
         }
-        for ticker, name, cik, _rank, sic_name in rows
+        for ticker, name, cik, _rank in rows
     ]
 
 
@@ -959,6 +945,38 @@ def top_companies_by_metric(
         sign = "-1.0" if negate else "1.0"
         negate_filter = " AND l.val < 0" if negate else ""
         financial_filter = " AND l.company_type NOT IN ('financial', 'insurance')" if exclude_financial_template else ""
+        pass_through_revenue_cte = ""
+        pass_through_revenue_join = ""
+        pass_through_revenue_filter = ""
+        if statement == "income_statement" and tag in {"total_revenue", "operating_revenue"}:
+            pass_through_revenue_cte = f"""
+            , revenue_cost AS (
+                SELECT
+                    s.cik,
+                    s.period_ending,
+                    s.fiscal_year,
+                    s.fiscal_period,
+                    MAX(s.val) AS cost_val
+                FROM {DATABASE_NAME}.standardized_statements_enc s
+                WHERE s.statement = 'income_statement'
+                  AND s.frequency = {_q(frequency)}
+                  AND s.tag IN ('total_cost_of_revenue', 'operating_cost_of_revenue')
+                  AND s.val IS NOT NULL
+                  AND s.period_ending >= CURRENT_DATE - INTERVAL 2 YEAR
+                GROUP BY s.cik, s.period_ending, s.fiscal_year, s.fiscal_period
+            )
+            """
+            pass_through_revenue_join = """
+                LEFT JOIN revenue_cost rc
+                    ON rc.cik = l.canonical_cik
+                   AND rc.period_ending = l.period_ending
+                   AND rc.fiscal_year = l.fiscal_year
+                   AND rc.fiscal_period = l.fiscal_period
+            """
+            pass_through_revenue_filter = (
+                " AND (l.val IS NULL OR l.val <= 0 OR rc.cost_val IS NULL OR rc.cost_val <= 0"
+                " OR rc.cost_val / NULLIF(l.val, 0) < 0.99)"
+            )
         rows = _rows(
             sess,
             f"""
@@ -972,6 +990,7 @@ def top_companies_by_metric(
                 FROM {DATABASE_NAME}.standardized_statements_enc s
                 WHERE {where_sql}
             )
+            {pass_through_revenue_cte}
             , pairs AS (
                 SELECT DISTINCT currency, period_ending
                 FROM latest WHERE rn = 1 AND currency != 'USD'
@@ -995,10 +1014,11 @@ def top_companies_by_metric(
                     l.canonical_cik, l.period_ending, l.fiscal_year, l.fiscal_period, l.currency,
                     l.val * IF(l.currency = 'USD', 1.0, nr.rate) * {sign} AS value_usd
                 FROM latest l
+                                {pass_through_revenue_join}
                 LEFT JOIN nearest_rates nr
                     ON nr.currency = l.currency AND nr.period_ending = l.period_ending
                 WHERE l.rn = 1
-                  AND (l.currency = 'USD' OR nr.rate IS NOT NULL){negate_filter}{financial_filter}
+                                    AND (l.currency = 'USD' OR nr.rate IS NOT NULL){negate_filter}{financial_filter}{pass_through_revenue_filter}
                 ORDER BY value_usd DESC
                 LIMIT {int(limit) * 4}
             )

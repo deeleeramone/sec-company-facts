@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from statistics import median
 from typing import Any
 
 from sec_app.db.cache import dolt_cached
@@ -47,11 +46,28 @@ _SIC_GICS: dict[str, tuple[str, str]] = {
     "278": ("Industrials", "Bookbinding"),
     "279": ("Industrials", "Printing Trade Services"),
     "281": ("Materials", "Industrial Inorganic Chemicals"),
+    "2810": ("Materials", "Industrial Inorganic Chemicals"),
     "282": ("Materials", "Plastics Materials & Synthetic Resins"),
+    "2820": ("Materials", "Plastics Materials & Synthetic Resins"),
+    "2821": ("Materials", "Plastics Materials & Synthetic Resins"),
+    "283": ("Health Care", "Drugs"),
+    "2833": ("Health Care", "Drugs"),
+    "2834": ("Health Care", "Drugs"),
+    "2835": ("Health Care", "Drugs"),
+    "2836": ("Health Care", "Drugs"),
+    "284": ("Consumer Staples", "Soap, Cleaners & Cosmetics"),
+    "2840": ("Consumer Staples", "Soap, Cleaners & Cosmetics"),
+    "2842": ("Consumer Staples", "Soap, Cleaners & Cosmetics"),
+    "2844": ("Consumer Staples", "Soap, Cleaners & Cosmetics"),
     "285": ("Materials", "Paints & Coatings"),
+    "2851": ("Materials", "Paints & Coatings"),
     "286": ("Materials", "Industrial Organic Chemicals"),
+    "2860": ("Materials", "Industrial Organic Chemicals"),
     "287": ("Materials", "Agricultural Chemicals"),
+    "2870": ("Materials", "Agricultural Chemicals"),
     "289": ("Materials", "Miscellaneous Chemical Products"),
+    "2890": ("Materials", "Miscellaneous Chemical Products"),
+    "2891": ("Materials", "Miscellaneous Chemical Products"),
     "30": ("Materials", "Rubber & Plastics Products"),
     "301": ("Consumer Discretionary", "Tires & Rubber"),
     "302": ("Materials", "Rubber & Plastics Footwear"),
@@ -312,11 +328,23 @@ _SIC_GICS: dict[str, tuple[str, str]] = {
     "3576": ("Information Technology", "Communications Equipment"),
     "3674": ("Information Technology", "Semiconductors & Semiconductor Equipment"),
     "3559": ("Information Technology", "Semiconductors & Semiconductor Equipment"),
+    "3841": ("Health Care", "Surgical & Medical Instruments"),
+    "4813": ("Communication Services", "Telephone Communications"),
+    "4911": ("Utilities", "Electric Services"),
+    "5812": ("Consumer Discretionary", "Eating & Drinking Places"),
+    "6021": ("Financials", "Commercial Banks"),
+    "6221": ("Financials", "Security Brokers & Dealers"),
+    "6282": ("Financials", "Services Allied with Securities Exchange"),
+    "6331": ("Financials", "Fire, Marine & Casualty Insurance"),
+    "7389": ("Industrials", "Business Services"),
+    "8200": ("Consumer Discretionary", "Educational Services"),
+    "8742": ("Industrials", "Management & Public Relations Services"),
     "6798": ("Real Estate", "Equity REITs"),
     "4953": ("Industrials", "Environmental & Facilities Services"),
 }
 
 _OVERRIDES: dict[str, tuple[str, str]] = {
+    "SHW": ("Materials", "Paints & Coatings"),
     "GOOGL": ("Communication Services", "Interactive Media & Services"),
     "GOOG": ("Communication Services", "Interactive Media & Services"),
     "META": ("Communication Services", "Interactive Media & Services"),
@@ -332,6 +360,10 @@ _OVERRIDES: dict[str, tuple[str, str]] = {
     "FIS": ("Information Technology", "IT Services"),
     "FI": ("Information Technology", "IT Services"),
     "GPN": ("Information Technology", "IT Services"),
+    "NKE": ("Consumer Discretionary", "Apparel, Accessories & Luxury Goods"),
+    "CROX": ("Consumer Discretionary", "Apparel, Accessories & Luxury Goods"),
+    "DECK": ("Consumer Discretionary", "Apparel, Accessories & Luxury Goods"),
+    "ONON": ("Consumer Discretionary", "Apparel, Accessories & Luxury Goods"),
 }
 
 
@@ -357,35 +389,51 @@ def _overrides_cte() -> str:
     indu = "CASE pt.ticker " + " ".join("WHEN %s THEN %s" % (_q(t), _q(v[1])) for t, v in _OVERRIDES.items()) + " END"
     tin = ",".join(_q(t) for t in _OVERRIDES)
     return f"""overrides AS (
-  SELECT cik, MAX(ovr_sector) AS ovr_sector, MAX(ovr_industry) AS ovr_industry FROM (
-    SELECT pt.cik, {sect} AS ovr_sector, {indu} AS ovr_industry
-    FROM primary_tickers pt WHERE pt.ticker IN ({tin})
-  ) z GROUP BY cik
+    SELECT cik, MAX(ovr_sector) AS ovr_sector, MAX(ovr_industry) AS ovr_industry FROM (
+        SELECT pt.cik, {sect} AS ovr_sector, {indu} AS ovr_industry
+        FROM primary_tickers pt WHERE pt.ticker IN ({tin})
+    ) z GROUP BY cik
 )"""
 
 
 def _classify_compute_cte() -> str:
     descr_subq = "(SELECT tag_id FROM xbrl_tags WHERE namespace='dei' AND tag='EntitySicDescription')"
-    return f"""WITH code AS (
-  SELECT cik, CAST(val AS UNSIGNED) AS sic4
-  FROM facts_enc
-  WHERE tag_id = {_SIC_CODE_SUBQ} AND val IS NOT NULL
+    return f"""WITH tradeable AS (
+    SELECT DISTINCT cik FROM primary_tickers
 ),
-tradeable AS (
-  SELECT DISTINCT cik FROM primary_tickers
+code AS (
+  SELECT cik, sic4 FROM (
+    SELECT f.cik,
+           CAST(f.val AS UNSIGNED) AS sic4,
+           ROW_NUMBER() OVER (
+             PARTITION BY f.cik
+             ORDER BY f.`end` DESC, f.filed DESC, f.id DESC
+           ) AS rn
+      FROM facts_enc f
+      JOIN tradeable tk ON tk.cik = f.cik
+     WHERE f.tag_id = {_SIC_CODE_SUBQ} AND f.val IS NOT NULL
+  ) x WHERE rn = 1
 ),
 sic_descr AS (
-  SELECT cik, val_text AS descr FROM facts_enc
-  WHERE tag_id = {descr_subq} AND val_text IS NOT NULL
+  SELECT cik, descr FROM (
+    SELECT f.cik,
+           f.val_text AS descr,
+           ROW_NUMBER() OVER (
+             PARTITION BY f.cik
+             ORDER BY f.`end` DESC, f.filed DESC, f.id DESC
+           ) AS rn
+      FROM facts_enc f
+      JOIN tradeable tk ON tk.cik = f.cik
+     WHERE f.tag_id = {descr_subq} AND f.val_text IS NOT NULL
+  ) x WHERE rn = 1
 ),
 {_overrides_cte()},
 classified AS (
   SELECT c.cik, c.sic4,
-         COALESCE(o.ovr_sector, {_gics_case('sector')}) AS sector,
-         COALESCE(o.ovr_industry, {_gics_case('industry')}) AS industry,
+         COALESCE(o.ovr_sector, {_gics_case("sector")}) AS sector,
+         COALESCE(o.ovr_industry, {_gics_case("industry")}) AS industry,
          COALESCE(d.descr, CONCAT('SIC ', CAST(c.sic4 AS CHAR))) AS sub_industry
   FROM code c
-  JOIN tradeable tk ON tk.cik = c.cik
   LEFT JOIN sic_descr d ON d.cik = c.cik
   LEFT JOIN overrides o ON o.cik = c.cik
 )"""
@@ -526,33 +574,146 @@ def sector_industry_aggregates(
     if industry:
         group_field = "sub_industry"
         where_sql = "WHERE cl.industry = %s" % _q(industry)
+        group_select = "b.sector, b.industry, b.sub_industry"
+        group_by = "b.sector, b.industry, b.sub_industry"
+        order_by = "companies DESC, industry ASC, sub_industry ASC"
     elif sector:
         group_field = "industry"
         where_sql = "WHERE cl.sector = %s" % _q(sector)
+        group_select = "b.sector, b.industry, NULL AS sub_industry"
+        group_by = "b.sector, b.industry"
+        order_by = "companies DESC, industry ASC"
     else:
         group_field = "sector"
         where_sql = ""
+        group_select = "b.sector, NULL AS industry, NULL AS sub_industry"
+        group_by = "b.sector"
+        order_by = "companies DESC, sector ASC"
 
     sql = f"""{_classify_cte()},
-{_revenue_cte()},
-{_has_revenue_cte()},
-{_productive_cte()},
-realbiz AS (
-  SELECT cik FROM has_rev
-  UNION
-  SELECT cik FROM productive
+metrics_ranked AS (
+  SELECT cik, tag, val,
+         ROW_NUMBER() OVER (PARTITION BY cik, tag ORDER BY period_ending DESC, fiscal_year DESC) rn
+    FROM standardized_statements_enc
+     WHERE frequency='annual' AND tag IN (
+         'total_revenue',
+         'operating_revenue',
+         'total_cost_of_revenue',
+         'operating_cost_of_revenue',
+         'net_income',
+         'total_assets'
+     )
+     AND period_ending >= CURRENT_DATE - INTERVAL 2 YEAR
 ),
-{_latest_metric_cte('ni', 'net_income', 'net_income')},
-{_latest_metric_cte('ta', 'total_assets', 'assets')}
-SELECT cl.sector, cl.industry, cl.sub_industry, r.revenue, n.net_income, a.assets,
-       CASE WHEN hr.cik IS NOT NULL THEN 1 ELSE 0 END AS has_revenue
-FROM classified cl
-JOIN realbiz rb ON rb.cik = cl.cik
-LEFT JOIN rev r ON r.cik = cl.cik
-LEFT JOIN has_rev hr ON hr.cik = cl.cik
-LEFT JOIN ni n ON n.cik = cl.cik
-LEFT JOIN ta a ON a.cik = cl.cik
-{where_sql}"""
+metrics_latest AS (
+  SELECT cik, tag, val
+    FROM metrics_ranked
+   WHERE rn = 1
+),
+metrics AS (
+  SELECT cik,
+                 COALESCE(
+                     MAX(CASE WHEN tag='total_revenue' THEN val ELSE NULL END),
+                     MAX(CASE WHEN tag='operating_revenue' THEN val ELSE NULL END)
+                 ) AS reported_revenue,
+                 COALESCE(
+                     MAX(CASE WHEN tag='total_cost_of_revenue' THEN val ELSE NULL END),
+                     MAX(CASE WHEN tag='operating_cost_of_revenue' THEN val ELSE NULL END)
+                 ) AS cost_of_revenue,
+         MAX(CASE WHEN tag='net_income' THEN val ELSE NULL END) net_income,
+         MAX(CASE WHEN tag='total_assets' THEN val ELSE NULL END) assets,
+                 CASE
+                     WHEN COALESCE(
+                         MAX(CASE WHEN tag='total_revenue' THEN val ELSE NULL END),
+                         MAX(CASE WHEN tag='operating_revenue' THEN val ELSE NULL END)
+                     ) > 0
+                        AND (
+                            COALESCE(
+                                MAX(CASE WHEN tag='total_cost_of_revenue' THEN val ELSE NULL END),
+                                MAX(CASE WHEN tag='operating_cost_of_revenue' THEN val ELSE NULL END)
+                            ) IS NULL
+                            OR COALESCE(
+                                MAX(CASE WHEN tag='total_cost_of_revenue' THEN val ELSE NULL END),
+                                MAX(CASE WHEN tag='operating_cost_of_revenue' THEN val ELSE NULL END)
+                            ) <= 0
+                            OR COALESCE(
+                                MAX(CASE WHEN tag='total_cost_of_revenue' THEN val ELSE NULL END),
+                                MAX(CASE WHEN tag='operating_cost_of_revenue' THEN val ELSE NULL END)
+                            ) / NULLIF(
+                                COALESCE(
+                                    MAX(CASE WHEN tag='total_revenue' THEN val ELSE NULL END),
+                                    MAX(CASE WHEN tag='operating_revenue' THEN val ELSE NULL END)
+                                ),
+                                0
+                            ) < 0.99
+                        )
+                     THEN 1 ELSE 0
+                 END AS has_revenue,
+                 CASE
+                     WHEN COALESCE(
+                         MAX(CASE WHEN tag='total_revenue' THEN val ELSE NULL END),
+                         MAX(CASE WHEN tag='operating_revenue' THEN val ELSE NULL END)
+                     ) > 0
+                        AND COALESCE(
+                            MAX(CASE WHEN tag='total_cost_of_revenue' THEN val ELSE NULL END),
+                            MAX(CASE WHEN tag='operating_cost_of_revenue' THEN val ELSE NULL END)
+                        ) > 0
+                        AND COALESCE(
+                            MAX(CASE WHEN tag='total_cost_of_revenue' THEN val ELSE NULL END),
+                            MAX(CASE WHEN tag='operating_cost_of_revenue' THEN val ELSE NULL END)
+                        ) / NULLIF(
+                            COALESCE(
+                                MAX(CASE WHEN tag='total_revenue' THEN val ELSE NULL END),
+                                MAX(CASE WHEN tag='operating_revenue' THEN val ELSE NULL END)
+                            ),
+                            0
+                        ) >= 0.99
+                     THEN 0
+                     ELSE COALESCE(
+                         MAX(CASE WHEN tag='total_revenue' THEN val ELSE NULL END),
+                         MAX(CASE WHEN tag='operating_revenue' THEN val ELSE NULL END),
+                         0
+                     )
+                 END AS revenue
+    FROM metrics_latest
+   GROUP BY cik
+),
+base AS (
+  SELECT cl.sector,
+         cl.industry,
+         cl.sub_industry,
+                 COALESCE(m.revenue, 0) AS revenue,
+         m.net_income,
+         COALESCE(m.assets, 0) AS assets,
+         m.has_revenue
+    FROM classified cl
+    LEFT JOIN metrics m ON m.cik = cl.cik
+    {where_sql}
+)
+SELECT {group_select},
+       COUNT(*) AS companies,
+       ROUND(100.0 * SUM(b.has_revenue) / COUNT(*), 1) AS with_revenue,
+       ROUND(
+         100.0 * SUM(CASE WHEN b.net_income > 0 THEN 1 ELSE 0 END)
+         / NULLIF(SUM(CASE WHEN b.net_income IS NOT NULL THEN 1 ELSE 0 END), 0),
+         1
+       ) AS profitable,
+       ROUND(SUM(CASE WHEN b.revenue > 0 THEN b.revenue ELSE 0 END), 0) AS total_revenue,
+       ROUND(SUM(CASE WHEN b.net_income IS NOT NULL THEN b.net_income ELSE 0 END), 0) AS total_net_income,
+       ROUND(SUM(CASE WHEN b.assets > 0 THEN b.assets ELSE 0 END), 0) AS total_assets,
+       ROUND(
+         100.0 * SUM(CASE WHEN b.net_income IS NOT NULL THEN b.net_income ELSE 0 END)
+         / NULLIF(SUM(CASE WHEN b.revenue > 0 THEN b.revenue ELSE 0 END), 0),
+         2
+       ) AS aggregate_net_margin,
+       ROUND(
+         100.0 * SUM(CASE WHEN b.net_income IS NOT NULL THEN b.net_income ELSE 0 END)
+         / NULLIF(SUM(CASE WHEN b.assets > 0 THEN b.assets ELSE 0 END), 0),
+         2
+       ) AS aggregate_roa
+  FROM base b
+ GROUP BY {group_by}
+ ORDER BY {order_by}"""
 
     sess = _session(db_path)
     try:
@@ -560,33 +721,33 @@ LEFT JOIN ta a ON a.cik = cl.cik
     finally:
         sess.close()
 
-    groups: dict[str, dict[str, Any]] = {}
-    for sec, ind, sub, revenue, net_income, assets, has_revenue in rows:
-        key = {"sector": sec, "industry": ind, "sub_industry": sub}[group_field]
-        bucket = groups.setdefault(key, {"sector": sec, "industry": ind, "sub": sub, "recs": []})
-        bucket["recs"].append((revenue, net_income, assets, has_revenue))
-
     out: list[dict[str, Any]] = []
-    for key, bucket in groups.items():
-        recs = bucket["recs"]
-        n = len(recs)
-        n_rev = sum(1 for rv, ni, ta, hr in recs if hr)
-        n_with_ni = sum(1 for rv, ni, ta, hr in recs if ni is not None)
-        n_prof = sum(1 for rv, ni, ta, hr in recs if ni and ni > 0)
-        margins = [ni / rv * 100 for rv, ni, ta, hr in recs if rv and rv > 0 and ni is not None]
-        roas = [ni / ta * 100 for rv, ni, ta, hr in recs if ta and ta > 0 and ni is not None]
-
-        row: dict[str, Any] = {"Sector": bucket["sector"]}
+    for (
+        sec,
+        ind,
+        sub,
+        companies,
+        with_revenue,
+        profitable,
+        total_revenue,
+        total_net_income,
+        total_assets,
+        aggregate_net_margin,
+        aggregate_roa,
+    ) in rows:
+        row: dict[str, Any] = {"Sector": sec}
         if group_field in ("industry", "sub_industry"):
-            row["Industry"] = bucket["industry"]
+            row["Industry"] = ind
         if group_field == "sub_industry":
-            row["Sub-Industry"] = bucket["sub"]
-        row["Companies"] = n
-        row["With Revenue"] = round(100 * n_rev / n, 1) if n else None
-        row["Profitable"] = round(100 * n_prof / n_with_ni, 1) if n_with_ni else None
-        row["Median Net Margin"] = round(median(margins), 2) if margins else None
-        row["Median ROA"] = round(median(roas), 2) if roas else None
+            row["Sub-Industry"] = sub
+        row["Companies"] = companies
+        row["With Revenue"] = with_revenue
+        row["Profitable"] = profitable
+        row["Total Revenue"] = total_revenue
+        row["Total Net Income"] = total_net_income
+        row["Total Assets"] = total_assets
+        row["Aggregate Net Margin"] = aggregate_net_margin
+        row["Aggregate ROA"] = aggregate_roa
         out.append(row)
 
-    out.sort(key=lambda r: r["Companies"], reverse=True)
     return out

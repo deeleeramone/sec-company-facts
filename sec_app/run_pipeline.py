@@ -17,6 +17,7 @@ from sec_app.db.ingest import (
     materialize_standardized_statements,
     run_update,
 )
+from sec_app.rebuild_gics import rebuild as rebuild_gics
 
 
 def _derived_counts(db_path: str | None = None) -> tuple[int, int]:
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-overrides", action="store_true")
     parser.add_argument("--skip-submissions", action="store_true")
     parser.add_argument("--skip-standardized", action="store_true")
+    parser.add_argument("--skip-gics", action="store_true")
     parser.add_argument("--skip-rates", action="store_true")
     args = parser.parse_args(argv)
 
@@ -76,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"[update] rematerialization inserted rows={recov.get('rows_inserted', 0):,}",
                 flush=True,
             )
+        if not args.skip_gics:
+            print("\n=== UPDATE STAGE 1: rebuild cik_gics ===", flush=True)
+            rebuilt = rebuild_gics()
+            print(f"[update] cik_gics rows={rebuilt:,}", flush=True)
         print(
             f"\n=== UPDATE TOTAL {time.time() - t_total:.1f}s  "
             f"changed_facts={result['changed_facts']:,}  "
@@ -167,11 +173,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
         times["standardized"] = time.time() - t0
 
+    if not args.skip_gics:
+        print("\n=== STAGE 6: rebuild cik_gics ===", flush=True)
+        t0 = time.time()
+        rebuilt = rebuild_gics()
+        print(f"[stage6] cik_gics rows={rebuilt:,}", flush=True)
+        times["gics"] = time.time() - t0
+
     if not args.skip_rates:
-        print("\n=== STAGE 6: exchange rates ===", flush=True)
+        print("\n=== STAGE 7: exchange rates ===", flush=True)
         t0 = time.time()
         rate_result = ingest_exchange_rates()
-        print(f"[stage6] exchange_rates rows={rate_result.get('rows', 0):,}", flush=True)
+        print(f"[stage7] exchange_rates rows={rate_result.get('rows', 0):,}", flush=True)
         times["rates"] = time.time() - t0
 
     stop[0] = True
