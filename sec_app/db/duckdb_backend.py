@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Sequence
 
 from sec_app.db.backend import _log_sql, _log_sql_done, _pyval
+
+_BACKTICK_IDENT = re.compile(r"`(\w+)`")
 
 _lock = threading.Lock()
 _conn = None
@@ -105,7 +108,7 @@ class _DuckReadConn:
         self._cur = cur
 
     def execute(self, sql: str, params: Sequence[Any] | None = None, *, stream: bool = False):
-        sql_duck = sql.replace("`", '"')
+        sql_duck = _BACKTICK_IDENT.sub(r'"\1"', sql)
         one_line = " ".join(sql_duck.split())
         _log_sql(one_line, params)
         t0 = time.perf_counter()

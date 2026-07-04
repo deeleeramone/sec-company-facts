@@ -22,7 +22,6 @@ jobs:
       contents: write
     env:
       DOLT_REPO: deeleeramone/sec-company-facts
-      # ---- Dolt connection for sec_app.db.ingest ----
       DOLT_SQL_HOST: 127.0.0.1
       DOLT_SQL_PORT: '3306'
       DOLT_SQL_USER: root
@@ -56,8 +55,6 @@ jobs:
           printf '%s' "$DOLTHUB_CREDENTIAL" | dolt creds import
 
       - name: Clone DoltHub repo
-        # Clone into a directory whose name matches DOLT_SQL_DB — the
-        # sql-server picks up the database name from the directory.
         run: dolt clone "$DOLT_REPO" sec_company_facts
 
       - name: Start dolt sql-server
@@ -110,16 +107,11 @@ jobs:
           MSG="${COMMIT_MSG_PREFIX} ($(date -u +%Y-%m-%d))"
           mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root \
             -e "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); SELECT 'push skipped' AS note;"
-
-      # ---- DuckDB parquet bundle: export from the running sql-server + publish ----
-      # The sql-server started above still holds the freshly-committed data, so we
-      # export parquet directly from it (DuckDB mysql extension) — no re-download,
-      # no clone. big tables are sorted by cik (single-threaded) and sharded.
-      # Output + sort spill go to /mnt (~65GB) to stay off the small OS disk.
       - name: Export parquet bundle from the running sql-server
         if: ${{ ! inputs.skip_push }}
         env:
           DUCKDB_TEMP_DIR: /mnt/duckdb-tmp
+          DUCKDB_MEMORY_LIMIT: 5GB
         run: |
           sudo mkdir -p /mnt/duckdb-tmp /mnt/parquet-out
           sudo chown "$(id -un)" /mnt/duckdb-tmp /mnt/parquet-out
@@ -137,7 +129,8 @@ jobs:
             || gh release create parquet-latest \
                  --title "SEC parquet bundle (latest)" \
                  --notes "DuckDB-ready parquet export of the SEC dataset. Rebuilt nightly by the DoltHub refresh workflow."
-          gh release upload parquet-latest /mnt/parquet-out/*.parquet /mnt/parquet-out/manifest.json --clobber
+          gh release upload parquet-latest /mnt/parquet-out/*.parquet --clobber
+          gh release upload parquet-latest /mnt/parquet-out/manifest.json --clobber
 
       - name: Stop dolt sql-server
         if: always()

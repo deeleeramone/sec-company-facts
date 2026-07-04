@@ -90,19 +90,16 @@ def _convert_rows_to_usd(rows):
         client = connect_read()
         all_dates = sorted({p[0] for p in pairs})
         currencies = list({p[1] for p in pairs})
-        min_date = all_dates[0]
         max_date = all_dates[-1]
         sql = (
             "SELECT rate_date, from_currency, rate "
             "FROM exchange_rates "
             "WHERE from_currency IN ({currencies}) "
             "AND to_currency = 'USD' "
-            "AND rate_date BETWEEN CAST('{min_date}' AS DATE) - INTERVAL 14 DAY "
-            "AND CAST('{max_date}' AS DATE) "
+            "AND rate_date <= CAST('{max_date}' AS DATE) "
             "ORDER BY from_currency, rate_date"
         ).format(
             currencies=", ".join(f"'{c}'" for c in currencies),
-            min_date=min_date,
             max_date=max_date,
         )
         result = client.execute(sql, stream=True)
@@ -129,6 +126,8 @@ def _convert_rows_to_usd(rows):
         f
         for f, info in model.model_fields.items()
         if f not in _NON_MONETARY_FIELDS
+        and not f.startswith("growth_")
+        and not f.endswith("_shares_os")
         and ("float" in str(info.annotation).lower() or "int" in str(info.annotation).lower())
     ]
     for row in rows:
