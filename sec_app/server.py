@@ -93,7 +93,7 @@ def _convert_rows_to_usd(rows):
         min_date = all_dates[0]
         max_date = all_dates[-1]
         sql = (
-            "SELECT CAST(rate_date AS CHAR), from_currency, rate "
+            "SELECT rate_date, from_currency, rate "
             "FROM exchange_rates "
             "WHERE from_currency IN ({currencies}) "
             "AND to_currency = 'USD' "
@@ -108,7 +108,9 @@ def _convert_rows_to_usd(rows):
         result = client.execute(sql, stream=True)
         rates_by_currency: dict[str, list] = defaultdict(list)
         for r in result:
-            rates_by_currency[r[1]].append((r[0], r[2]))
+            rate_date = r[0]
+            date_key = rate_date.isoformat() if hasattr(rate_date, "isoformat") else str(rate_date)[:10]
+            rates_by_currency[r[1]].append((date_key, r[2]))
         rate_map: dict[tuple, float] = {}
         for date_str, currency in pairs:
             rate_list = rates_by_currency.get(currency, [])

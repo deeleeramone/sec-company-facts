@@ -113,24 +113,32 @@ it. App is at <http://localhost:8000>. Levers:
 
 ### Export the parquet bundle yourself
 
-No clone or `dolt` binary is required — the exporter reads the DoltHub REST API
-(full-table CSV for regular tables, `HEX(payload)` over the JSON API for the one
-blob table) and writes typed, cik-sorted parquet plus a `manifest.json`:
+`python -m sec_app.export_parquet` writes typed, cik-sorted parquet plus a
+`manifest.json`. It has two sources:
 
 ```bash
-python -m sec_app.export_parquet --out ./parquet
-# small/CIK-sliced test export (big tables limited to a few CIKs):
-python -m sec_app.export_parquet --out ./parquet-slice --ciks 320193,789019,1045810
+# From a running Dolt/MySQL sql-server (fast; DuckDB mysql extension). Used by CI,
+# where the refresh job's server already holds the fresh data.
+python -m sec_app.export_parquet --source server --server 127.0.0.1:3306/sec_company_facts --out ./parquet
+
+# From the DoltHub REST API — no clone, no server, no dolt binary. Full-table CSV
+# for regular tables + HEX(payload) over the JSON API for the one blob table.
+python -m sec_app.export_parquet --source rest --out ./parquet
+
+# Small CIK-sliced test export (big tables limited to a few CIKs), either source:
+python -m sec_app.export_parquet --source rest --out ./parquet-slice --ciks 320193,789019,1045810
 ```
 
 The two large tables (`facts_enc`, `standardized_statements_enc`) are sorted by
 `cik` and sharded to stay under GitHub's 2 GiB/asset limit, so per-CIK lookups
-prune on row-group statistics.
+prune on row-group statistics. (Note: DuckDB httpfs is deliberately **not** used
+for the REST source — DoltHub ignores HTTP Range, so each table's CSV is fetched
+with a single plain GET to a temp dir, configurable via `--tmp-dir`.)
 
 ### Refresh & publish
 
-The nightly [DoltHub refresh workflow](.github/workflows/nightly-dolthub.yml) runs
-the exporter after each push and uploads the bundle to the `parquet-latest`
-Release. Build/publish the image with the **Publish DuckDB container image**
-workflow ([.github/workflows/publish-duckdb-image.yml](.github/workflows/publish-duckdb-image.yml)),
+The nightly [DoltHub refresh workflow](.github/workflows/nightly-dolthub.yml)
+exports parquet from the running sql-server after each push and uploads the bundle
+to the `parquet-latest` Release. Build/publish the image with the **Publish DuckDB
+container image** workflow ([.github/workflows/publish-duckdb-image.yml](.github/workflows/publish-duckdb-image.yml)),
 which tags `duckdb-latest` / `duckdb-<date>`.

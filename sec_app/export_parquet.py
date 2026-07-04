@@ -4,6 +4,7 @@ import argparse
 import binascii
 import json
 import os
+import shutil
 import sys
 import urllib.parse
 import urllib.request
@@ -112,45 +113,29 @@ TABLE_TYPES: dict[str, dict[str, str]] = {
         "industry": "VARCHAR",
         "sub_industry": "VARCHAR",
     },
+    "submissions": {"cik": "VARCHAR", "payload": "BLOB", "source_mtime": "TIMESTAMP"},
 }
 
-SUBMISSIONS_TYPES = {"cik": "VARCHAR", "payload": "BLOB", "source_mtime": "TIMESTAMP"}
-
-ALL_TABLES = list(TABLE_TYPES.keys()) + ["submissions"]
+ALL_TABLES = list(TABLE_TYPES.keys())
 
 
-def _sql_quote(value: str) -> str:
+def _duck_columns(table: str) -> dict[str, str]:
+    return TABLE_TYPES[table]
+
+
+def _sql_quote(value) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _json_query(owner: str, repo: str, branch: str, sql: str) -> list[dict]:
-    q = urllib.parse.urlencode({"q": sql})
-    url = f"{API_BASE}/{owner}/{repo}/{branch}?{q}"
-    req = urllib.request.Request(url, headers={"User-Agent": "sec-app-export"})
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-    status = payload.get("query_execution_status")
-    if status not in ("Success", "RowLimit"):
-        raise RuntimeError(f"DoltHub query failed: {payload.get('query_execution_message')} :: {sql[:200]}")
-    return payload.get("rows", []) or []
+def _order_clause(table: str, sort: bool, types: dict[str, str]) -> str:
+    if table in BIG_TABLES and sort and SORT_KEY in types:
+        return f' ORDER BY "{SORT_KEY}"'
+    return ""
 
 
-def _data_version(owner: str, repo: str, branch: str) -> str:
-    rows = _json_query(owner, repo, branch, "SELECT dolt_hashof_db() AS v")
-    return str(rows[0]["v"]) if rows else "unknown"
-
-
-def _columns_struct(types: dict[str, str]) -> str:
-    return "{" + ", ".join(f"'{c}': '{t}'" for c, t in types.items()) + "}"
-
-
-def _read_csv_expr(source: str, types: dict[str, str]) -> str:
-    s = source.replace("'", "''")
-    return (
-        f"read_csv('{s}', header=true, columns={_columns_struct(types)}, "
-        "nullstr='', quote='\"', escape='\"')"
-    )
-
+# ---------------------------------------------------------------------------
+# Shared DuckDB parquet writer (typed projection -> sorted/sharded parquet).
+# ---------------------------------------------------------------------------
 
 def _shard_index(path: Path) -> int:
     stem = path.stem.split("_")[-1]
@@ -183,6 +168,15 @@ def _copy_parquet(con, select_sql: str, target: Path, big: bool, shard_bytes: st
     return files
 
 
+def _write_table(con, table: str, relation: str, out_dir: Path, sort: bool, shard_bytes: str) -> list[str]:
+    types = _duck_columns(table)
+    cols = ", ".join(f'CAST("{c}" AS {t}) AS "{c}"' for c, t in types.items())
+    select_sql = f"SELECT {cols} FROM {relation}{_order_clause(table, sort, types)}"
+    big = table in BIG_TABLES
+    target = (out_dir / table) if big else (out_dir / f"{table}.parquet")
+    return _copy_parquet(con, select_sql, target, big, shard_bytes)
+
+
 def _parquet_count(con, out_dir: Path, files: list[str]) -> int:
     paths = ", ".join("'" + str(out_dir / f).replace("'", "''") + "'" for f in files)
     return int(con.execute(f"SELECT COUNT(*) FROM read_parquet([{paths}])").fetchone()[0])
@@ -192,29 +186,116 @@ def _bytes_of(out_dir: Path, files: list[str]) -> int:
     return sum((out_dir / f).stat().st_size for f in files)
 
 
-def _export_csv_table(con, owner, repo, branch, table, out_dir, sort, shard_bytes):
-    types = TABLE_TYPES[table]
+# ---------------------------------------------------------------------------
+# Source: running Dolt / MySQL sql-server (DuckDB mysql extension).
+# ---------------------------------------------------------------------------
+
+def _server_attach(con, server: str, user: str, password: str) -> None:
+    host, _, rest = server.partition(":")
+    port, _, db = rest.partition("/")
+    if not host or not port or not db:
+        raise SystemExit(f"--server must be host:port/database (got {server!r})")
+    dsn = f"host={host} port={int(port)} user={user} database={db}"
+    if password:
+        dsn += f" password={password}"
+    con.execute("INSTALL mysql")
+    con.execute("LOAD mysql")
+    con.execute(f"ATTACH '{dsn}' AS src (TYPE mysql, READ_ONLY)")
+
+
+def _server_data_version(con) -> str:
+    try:
+        row = con.execute("SELECT v FROM mysql_query('src', 'SELECT dolt_hashof_db() AS v')").fetchone()
+        return str(row[0]) if row and row[0] is not None else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _export_server_table(con, table, out_dir, sort, shard_bytes, ciks) -> list[str]:
+    types = _duck_columns(table)
+    if ciks and SORT_KEY in types:
+        # The DuckDB mysql extension mis-pushes IN/OR predicates to Dolt (returns
+        # 0 rows), so a cik slice goes through mysql_query passthrough, which sends
+        # the predicate to Dolt verbatim. Backtick the columns (end/start/rank are
+        # reserved) and double the quotes for the enclosing DuckDB string literal.
+        inner_cols = ", ".join(f"`{c}`" for c in types)
+        in_list = ", ".join("''" + c + "''" for c in ciks)
+        relation = f"mysql_query('src', 'SELECT {inner_cols} FROM {table} WHERE cik IN ({in_list})')"
+    else:
+        relation = f'src."{table}"'
+    print(f"[export] {table} <- server (sort={sort and table in BIG_TABLES}) ...", flush=True)
+    return _write_table(con, table, relation, out_dir, sort, shard_bytes)
+
+
+# ---------------------------------------------------------------------------
+# Source: DoltHub REST API (full-table CSV + HEX for the one blob table).
+# ---------------------------------------------------------------------------
+
+def _json_query(owner: str, repo: str, branch: str, sql: str) -> list[dict]:
+    q = urllib.parse.urlencode({"q": sql})
+    url = f"{API_BASE}/{owner}/{repo}/{branch}?{q}"
+    req = urllib.request.Request(url, headers={"User-Agent": "sec-app-export"})
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    status = payload.get("query_execution_status")
+    if status not in ("Success", "RowLimit"):
+        raise RuntimeError(f"DoltHub query failed: {payload.get('query_execution_message')} :: {sql[:200]}")
+    return payload.get("rows", []) or []
+
+
+def _rest_data_version(owner: str, repo: str, branch: str) -> str:
+    rows = _json_query(owner, repo, branch, "SELECT dolt_hashof_db() AS v")
+    return str(rows[0]["v"]) if rows else "unknown"
+
+
+def _download_csv(url: str, dest: Path, attempts: int = 3) -> None:
+    # Plain full GET. DuckDB httpfs must NOT be used here: DoltHub ignores HTTP
+    # Range requests (returns 200 + full body), so range-based readers corrupt
+    # the stream on large tables. A single sequential GET is clean.
+    last_err: Exception | None = None
+    for i in range(attempts):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "sec-app-export"})
+            with urllib.request.urlopen(req, timeout=3600) as resp, open(dest, "wb") as fh:
+                shutil.copyfileobj(resp, fh, length=1 << 20)
+            return
+        except Exception as err:  # noqa: BLE001
+            last_err = err
+            print(f"[export] download attempt {i + 1}/{attempts} failed: {err}", flush=True)
+    raise RuntimeError(f"failed to download {url}: {last_err}")
+
+
+def _read_csv_expr(csv_path: str, types: dict[str, str]) -> str:
+    cols = "{" + ", ".join(f"'{c}': '{t}'" for c, t in types.items()) + "}"
+    p = csv_path.replace("'", "''")
+    return f"read_csv('{p}', header=true, columns={cols}, nullstr='', quote='\"', escape='\"')"
+
+
+def _export_csv_table(con, owner, repo, branch, table, out_dir, tmp_dir, sort, shard_bytes) -> list[str]:
     url = f"{CSV_BASE}/{owner}/{repo}/{branch}/{table}"
-    big = table in BIG_TABLES
-    order = f" ORDER BY {SORT_KEY}" if (big and sort) else ""
-    select_sql = f"SELECT * FROM {_read_csv_expr(url, types)}{order}"
-    target = (out_dir / table) if big else (out_dir / f"{table}.parquet")
-    print(f"[export] streaming {table} csv -> parquet (big={big}, sort={sort and big}) ...", flush=True)
-    return _copy_parquet(con, select_sql, target, big, shard_bytes)
+    csv_path = tmp_dir / f"{table}.csv"
+    print(f"[export] downloading {table} csv ...", flush=True)
+    _download_csv(url, csv_path)
+    relation = _read_csv_expr(str(csv_path), TABLE_TYPES[table])
+    print(f"[export] {table} -> parquet (sort={sort and table in BIG_TABLES}) ...", flush=True)
+    try:
+        return _write_table(con, table, relation, out_dir, sort, shard_bytes)
+    finally:
+        csv_path.unlink(missing_ok=True)
 
 
 def _coerce(value, duck_type: str):
     if value is None or value == "":
         return None
     t = duck_type.upper()
-    if t in ("VARCHAR",):
+    if t == "VARCHAR":
         return str(value)
     if t in ("INTEGER", "BIGINT"):
         return int(float(value))
     if t == "DOUBLE":
         return float(value)
     if t == "BOOLEAN":
-        return str(value) not in ("0", "false", "False", "")
+        return str(value) not in ("0", "false", "False")
     if t == "DATE":
         return date.fromisoformat(str(value)[:10])
     if t == "TIMESTAMP":
@@ -246,8 +327,9 @@ def _write_arrow(out_path: Path, columns: dict[str, str], data: dict[str, list])
     pq.write_table(table, out_path, compression="zstd")
 
 
-def _export_submissions(owner, repo, branch, out_dir, ciks) -> list[str]:
-    print("[export] fetching submissions via JSON HEX (keyset) ...", flush=True)
+def _export_submissions_rest(owner, repo, branch, out_dir, ciks) -> list[str]:
+    print("[export] submissions <- JSON HEX (keyset) ...", flush=True)
+    types = TABLE_TYPES["submissions"]
     data: dict[str, list] = {"cik": [], "payload": [], "source_mtime": []}
     cik_filter = f"AND cik IN ({', '.join(_sql_quote(c) for c in ciks)}) " if ciks else ""
     last = ""
@@ -267,10 +349,10 @@ def _export_submissions(owner, repo, branch, out_dir, ciks) -> list[str]:
             data["source_mtime"].append(_coerce(r.get("source_mtime"), "TIMESTAMP"))
         last = str(rows[-1]["cik"])
         total += len(rows)
-        print(f"[export] submissions {total} rows ...", flush=True)
         if len(rows) < BLOB_PAGE:
             break
-    _write_arrow(out_dir / "submissions.parquet", SUBMISSIONS_TYPES, data)
+    print(f"[export] submissions: {total} rows", flush=True)
+    _write_arrow(out_dir / "submissions.parquet", types, data)
     return ["submissions.parquet"]
 
 
@@ -304,62 +386,93 @@ def _export_json_slice(owner, repo, branch, table, ciks, out_dir) -> list[str]:
     return [f"{table}.parquet"]
 
 
-def run_export(owner, repo, branch, out, tables, sort, shard_bytes, ciks):
+# ---------------------------------------------------------------------------
+
+def run_export(
+    *, source, owner, repo, branch, server, server_user, server_password,
+    out, tables, sort, shard_bytes, ciks, tmp_dir,
+):
     import duckdb
 
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     con = duckdb.connect()
     con.execute("PRAGMA enable_progress_bar=false")
-    con.execute("INSTALL httpfs")
-    con.execute("LOAD httpfs")
-    tmp = os.environ.get("DUCKDB_TEMP_DIR")
-    if tmp:
-        con.execute(f"SET temp_directory = '{tmp}'")
+    spill = os.environ.get("DUCKDB_TEMP_DIR") or tmp_dir
+    if spill:
+        Path(spill).mkdir(parents=True, exist_ok=True)
+        con.execute(f"SET temp_directory = '{str(spill).replace(chr(39), chr(39) * 2)}'")
+    mem = os.environ.get("DUCKDB_MEMORY_LIMIT")
+    if mem:
+        con.execute(f"SET memory_limit = '{mem}'")
 
-    version = _data_version(owner, repo, branch)
+    tdir = None
+    if source == "server":
+        _server_attach(con, server, server_user, server_password)
+        version = _server_data_version(con)
+    else:
+        version = _rest_data_version(owner, repo, branch)
+        tdir = Path(tmp_dir) if tmp_dir else (out_dir / "_tmp")
+        tdir.mkdir(parents=True, exist_ok=True)
+
     manifest_tables: dict[str, dict] = {}
-
     for table in tables:
-        if table == "submissions":
-            files = _export_submissions(owner, repo, branch, out_dir, ciks)
+        if source == "server":
+            files = _export_server_table(con, table, out_dir, sort, shard_bytes, ciks)
+        elif table == "submissions":
+            files = _export_submissions_rest(owner, repo, branch, out_dir, ciks)
         elif ciks and table in BIG_TABLES:
             print(f"[export] slice {table} for {len(ciks)} ciks via JSON ...", flush=True)
             files = _export_json_slice(owner, repo, branch, table, ciks, out_dir)
         else:
-            files = _export_csv_table(con, owner, repo, branch, table, out_dir, sort, shard_bytes)
+            files = _export_csv_table(con, owner, repo, branch, table, out_dir, tdir, sort, shard_bytes)
         rows = _parquet_count(con, out_dir, files)
         manifest_tables[table] = {"files": files, "rows": rows, "bytes": _bytes_of(out_dir, files)}
         print(f"[export] {table}: {rows} rows, {len(files)} file(s)", flush=True)
+
+    if tdir is not None:
+        shutil.rmtree(tdir, ignore_errors=True)
 
     manifest = {
         "format_version": 1,
         "data_version": version,
         "exported_at": datetime.now(timezone.utc).isoformat(),
-        "source": {"owner": owner, "repo": repo, "branch": branch},
+        "source": {"mode": source, "owner": owner, "repo": repo, "branch": branch, "server": server},
         "sliced_ciks": sorted(ciks) if ciks else None,
         "tables": manifest_tables,
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    print(f"[export] wrote manifest.json (data_version={version})", flush=True)
+    print(f"[export] wrote manifest.json (source={source} data_version={version})", flush=True)
     return manifest
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m sec_app.export_parquet",
-        description="Export the DoltHub SEC repo to parquet via the REST API (no clone).",
+        description="Export the SEC dataset to parquet for the DuckDB serving image.",
     )
-    parser.add_argument("--owner", default=DEFAULT_OWNER)
-    parser.add_argument("--repo", default=DEFAULT_REPO)
-    parser.add_argument("--branch", default=DEFAULT_BRANCH)
+    parser.add_argument(
+        "--source",
+        choices=["rest", "server"],
+        default="rest",
+        help="rest: DoltHub REST API (no clone/server). server: a running Dolt/MySQL sql-server.",
+    )
+    parser.add_argument("--owner", default=DEFAULT_OWNER, help="[rest] DoltHub owner")
+    parser.add_argument("--repo", default=DEFAULT_REPO, help="[rest] DoltHub repo")
+    parser.add_argument("--branch", default=DEFAULT_BRANCH, help="[rest] branch")
+    parser.add_argument("--server", default="", help="[server] host:port/database")
+    parser.add_argument("--server-user", default="root")
+    parser.add_argument("--server-password", default="")
     parser.add_argument("--out", required=True, help="Output directory for parquet + manifest.json")
     parser.add_argument("--tables", default="", help="Comma-separated subset (default: all)")
     parser.add_argument("--no-sort", action="store_true", help="Skip cik sort of big tables (lighter export)")
     parser.add_argument("--shard-bytes", default="1500MB", help="Target parquet shard size for big tables")
-    parser.add_argument("--ciks", default="", help="Comma-separated CIK slice for big tables (test exports)")
+    parser.add_argument("--ciks", default="", help="Comma-separated CIK slice (test exports)")
+    parser.add_argument("--tmp-dir", default="", help="[rest] scratch dir for downloaded CSVs (default: <out>/_tmp)")
     args = parser.parse_args(argv)
+
+    if args.source == "server" and not args.server:
+        parser.error("--source server requires --server host:port/database")
 
     tables = [t.strip() for t in args.tables.split(",") if t.strip()] if args.tables else list(ALL_TABLES)
     unknown = [t for t in tables if t not in ALL_TABLES]
@@ -368,14 +481,19 @@ def main(argv: list[str] | None = None) -> int:
     ciks = [c.strip().zfill(10) for c in args.ciks.split(",") if c.strip()]
 
     run_export(
+        source=args.source,
         owner=args.owner,
         repo=args.repo,
         branch=args.branch,
+        server=args.server,
+        server_user=args.server_user,
+        server_password=args.server_password,
         out=args.out,
         tables=tables,
         sort=not args.no_sort,
         shard_bytes=args.shard_bytes,
         ciks=ciks,
+        tmp_dir=args.tmp_dir or None,
     )
     return 0
 

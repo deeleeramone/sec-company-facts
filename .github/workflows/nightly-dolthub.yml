@@ -111,13 +111,12 @@ jobs:
           mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root \
             -e "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); SELECT 'push skipped' AS note;"
 
-      # ---- DuckDB parquet bundle: export from DoltHub (REST) + publish to a Release ----
-      # Resource note: facts_enc/standardized_statements_enc are large; the export
-      # streams their CSV from DoltHub and sorts by cik (single-threaded) before
-      # sharding. Output + sort spill go to /mnt (~65GB) to stay off the small OS
-      # disk. Watch the first full run; if it exceeds the runner, use a larger
-      # runner or reduce --shard-bytes.
-      - name: Export parquet bundle from DoltHub (REST)
+      # ---- DuckDB parquet bundle: export from the running sql-server + publish ----
+      # The sql-server started above still holds the freshly-committed data, so we
+      # export parquet directly from it (DuckDB mysql extension) — no re-download,
+      # no clone. big tables are sorted by cik (single-threaded) and sharded.
+      # Output + sort spill go to /mnt (~65GB) to stay off the small OS disk.
+      - name: Export parquet bundle from the running sql-server
         if: ${{ ! inputs.skip_push }}
         env:
           DUCKDB_TEMP_DIR: /mnt/duckdb-tmp
@@ -125,7 +124,7 @@ jobs:
           sudo mkdir -p /mnt/duckdb-tmp /mnt/parquet-out
           sudo chown "$(id -un)" /mnt/duckdb-tmp /mnt/parquet-out
           python -m sec_app.export_parquet \
-            --owner "${DOLT_REPO%%/*}" --repo "${DOLT_REPO##*/}" --branch main \
+            --source server --server "127.0.0.1:${DOLT_SQL_PORT}/${DOLT_SQL_DB}" \
             --out /mnt/parquet-out --shard-bytes 1500MB
           ls -lh /mnt/parquet-out
 
