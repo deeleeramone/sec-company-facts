@@ -7,6 +7,7 @@ from typing import Any
 from openbb_core.app.model.abstract.error import OpenBBError
 
 from sec_app.db.cache import dolt_cached
+from sec_app.db.dialect import like_escape_suffix, quote_literal
 from sec_app.db.schema import DATABASE_NAME
 
 
@@ -60,7 +61,7 @@ def _normalise_ticker(ticker: str) -> str:
 
 
 def _q(value: str) -> str:
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return quote_literal(value)
 
 
 def load_company_facts(
@@ -325,7 +326,7 @@ def search_entities(
         rows = _rows(
             sess,
             f"SELECT cik, entity_name FROM {DATABASE_NAME}.entities "
-            f"WHERE entity_name LIKE {_q(pat)} "
+            f"WHERE entity_name LIKE {_q(pat)}{like_escape_suffix()} "
             f"ORDER BY entity_name LIMIT {int(limit)}",
         )
     finally:

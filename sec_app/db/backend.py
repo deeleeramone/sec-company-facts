@@ -218,6 +218,13 @@ def table_name(unqualified: str) -> str:
 
 
 def connect_read(db_path: str | None = None):
+    from sec_app.db.dialect import is_duckdb  # pylint: disable=import-outside-toplevel
+
+    if is_duckdb():
+        from sec_app.db.duckdb_backend import connect_read as _duck_connect_read  # pylint: disable=import-outside-toplevel
+
+        return _duck_connect_read()
+
     try:
         import pymysql  # type: ignore  # pylint: disable=import-outside-toplevel
     except ImportError as err:  # pragma: no cover - import guard
@@ -243,6 +250,22 @@ def connect_read(db_path: str | None = None):
         init_command="SET SESSION sql_mode='ANSI_QUOTES'",
     )
     return _DoltReadConn(conn)
+
+
+def data_version() -> str:
+    from sec_app.db.dialect import is_duckdb  # pylint: disable=import-outside-toplevel
+
+    if is_duckdb():
+        from sec_app.db.duckdb_backend import data_version as _duck_data_version  # pylint: disable=import-outside-toplevel
+
+        return _duck_data_version()
+
+    sess = connect_read()
+    try:
+        row = sess.execute("SELECT dolt_hashof_db()").fetchone()
+        return str(row[0]) if row and row[0] is not None else "unknown"
+    finally:
+        sess.close()
 
 
 class _DoltReadConn:

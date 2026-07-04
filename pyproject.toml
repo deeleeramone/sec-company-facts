@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "sec-app"
 version = "0.1.0"
-description = "Serving layer (Dolt SQL server + widgets API) for SEC company facts. Consumes the openbb-sec provider from PyPI."
+description = "Serving layer (Dolt SQL server or DuckDB-over-parquet + widgets API) for SEC company facts. Consumes the openbb-sec provider from PyPI."
 authors = ["OpenBB Team <hello@openbb.co>"]
 license = "AGPL-3.0-only"
 readme = "README.md"
@@ -14,6 +14,7 @@ openbb-sec = ">=1.6.2"
 fastapi = ">=0.110"
 uvicorn = { version = ">=0.30", extras = ["standard"] }
 pymysql = "^1.1"
+duckdb = ">=1.0"
 pyarrow = ">=17"
 pandas = ">=2.0"
 psutil = ">=5.9"

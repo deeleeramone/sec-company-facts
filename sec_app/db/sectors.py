@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from sec_app.db.cache import dolt_cached
+from sec_app.db.dialect import cast_uint, table_exists
 from sec_app.db.query import _q, _rows, _session
 
 _SIC_CODE_SUBQ = "(SELECT tag_id FROM xbrl_tags WHERE namespace='dei' AND tag='EntitySicCode')"
@@ -404,7 +405,7 @@ def _classify_compute_cte() -> str:
 code AS (
   SELECT cik, sic4 FROM (
     SELECT f.cik,
-           CAST(f.val AS UNSIGNED) AS sic4,
+           {cast_uint("f.val")} AS sic4,
            ROW_NUMBER() OVER (
              PARTITION BY f.cik
              ORDER BY f.`end` DESC, f.filed DESC, f.id DESC
@@ -451,7 +452,7 @@ def _has_cik_gics() -> bool:
     try:
         sess = _session()
         try:
-            _cik_gics_present = sess.execute("SHOW TABLES LIKE 'cik_gics'").fetchone() is not None
+            _cik_gics_present = table_exists(sess, "cik_gics")
         finally:
             sess.close()
     except Exception:

@@ -18,6 +18,8 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    permissions:
+      contents: write
     env:
       DOLT_REPO: deeleeramone/sec-company-facts
       # ---- Dolt connection for sec_app.db.ingest ----
@@ -108,6 +110,35 @@ jobs:
           MSG="${COMMIT_MSG_PREFIX} ($(date -u +%Y-%m-%d))"
           mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root \
             -e "USE \`${DOLT_SQL_DB}\`; CALL DOLT_ADD('-A'); CALL DOLT_COMMIT('--skip-empty', '-m', '${MSG}'); SELECT 'push skipped' AS note;"
+
+      # ---- DuckDB parquet bundle: export from DoltHub (REST) + publish to a Release ----
+      # Resource note: facts_enc/standardized_statements_enc are large; the export
+      # streams their CSV from DoltHub and sorts by cik (single-threaded) before
+      # sharding. Output + sort spill go to /mnt (~65GB) to stay off the small OS
+      # disk. Watch the first full run; if it exceeds the runner, use a larger
+      # runner or reduce --shard-bytes.
+      - name: Export parquet bundle from DoltHub (REST)
+        if: ${{ ! inputs.skip_push }}
+        env:
+          DUCKDB_TEMP_DIR: /mnt/duckdb-tmp
+        run: |
+          sudo mkdir -p /mnt/duckdb-tmp /mnt/parquet-out
+          sudo chown "$(id -un)" /mnt/duckdb-tmp /mnt/parquet-out
+          python -m sec_app.export_parquet \
+            --owner "${DOLT_REPO%%/*}" --repo "${DOLT_REPO##*/}" --branch main \
+            --out /mnt/parquet-out --shard-bytes 1500MB
+          ls -lh /mnt/parquet-out
+
+      - name: Publish parquet bundle to GitHub Release
+        if: ${{ ! inputs.skip_push }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view parquet-latest >/dev/null 2>&1 \
+            || gh release create parquet-latest \
+                 --title "SEC parquet bundle (latest)" \
+                 --notes "DuckDB-ready parquet export of the SEC dataset. Rebuilt nightly by the DoltHub refresh workflow."
+          gh release upload parquet-latest /mnt/parquet-out/*.parquet /mnt/parquet-out/manifest.json --clobber
 
       - name: Stop dolt sql-server
         if: always()

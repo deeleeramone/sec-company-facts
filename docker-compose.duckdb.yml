@@ -1,0 +1,37 @@
+services:
+  widgets-duckdb:
+    # Pull the published image with `docker compose -f docker-compose.duckdb.yml pull`,
+    # or build locally with `docker compose -f docker-compose.duckdb.yml build`.
+    image: ${WIDGETS_DUCKDB_IMAGE:-ghcr.io/deeleeramone/sec-company-facts:duckdb-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.duckdb
+    environment:
+      SEC_BACKEND: duckdb
+      SEC_PARQUET_DIR: /data/parquet
+      # On first start the container downloads this bundle into the volume. To
+      # serve a locally-exported parquet dir instead, leave this empty and mount
+      # your dir at /data/parquet (see the volumes note below).
+      PARQUET_MANIFEST_URL: ${PARQUET_MANIFEST_URL:-https://github.com/deeleeramone/sec-company-facts/releases/download/parquet-latest/manifest.json}
+      # Optional DuckDB tuning (default: DuckDB auto-detects).
+      DUCKDB_THREADS: ${DUCKDB_THREADS:-}
+      DUCKDB_MEMORY_LIMIT: ${DUCKDB_MEMORY_LIMIT:-}
+      WIDGETS_WORKERS: ${WIDGETS_WORKERS:-1}
+    ports:
+      - "${WIDGETS_PORT:-8000}:8000"
+    volumes:
+      # Named volume reused across runs so the bundle is downloaded once. To serve
+      # an existing host export instead, replace with:  - /abs/path/to/parquet:/data/parquet
+      # and set PARQUET_MANIFEST_URL to an empty string.
+      - sec_parquet_data:/data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: ${WIDGETS_MEMORY_LIMIT:-2G}
+    mem_limit: ${WIDGETS_MEMORY_LIMIT:-2G}
+    memswap_limit: ${WIDGETS_MEMORY_LIMIT:-2G}
+
+volumes:
+  sec_parquet_data:
+    name: sec_parquet_data

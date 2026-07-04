@@ -7,6 +7,13 @@ does **not** bake the database into the image — on first start it clones the
 public DoltHub repo `deeleeramone/sec-company-facts` into a volume and then
 stays current via Dolt read replication.
 
+> There are **two serving variants** of the same widgets API:
+> 1. **Dolt** (this image, default) — `dolt sql-server` + the app.
+> 2. **DuckDB-over-parquet** — no Dolt, no MySQL: the repo is exported to parquet
+>    and queried directly with embedded DuckDB. See
+>    [DuckDB-over-parquet variant](#duckdb-over-parquet-variant) below. Both
+>    variants return identical widget output.
+
 ## Run the published image
 
 ```bash
@@ -78,3 +85,52 @@ docker run -d -p 8000:8000 -v sec_dolt_data:/data \
 Run the **Publish container image** workflow ([.github/workflows/publish-image.yml](.github/workflows/publish-image.yml))
 manually (`workflow_dispatch`). It builds a small, code-only image — the data is
 fetched at runtime, never baked in.
+
+## DuckDB-over-parquet variant
+
+A second image serves the **identical** widgets API with **no Dolt at serving
+time**. The DoltHub repo is exported to parquet (via the DoltHub REST API — no
+clone), published as a downloadable bundle, and the container queries the parquet
+directly with embedded DuckDB. Backends are selected by `SEC_BACKEND` (`dolt`
+default, `duckdb` for this variant); the app code is shared.
+
+### Run it
+
+```bash
+docker compose -f docker-compose.duckdb.yml up -d
+```
+
+On first start the container downloads the published parquet bundle (the
+`parquet-latest` GitHub Release, refreshed nightly) into a named volume and serves
+it. App is at <http://localhost:8000>. Levers:
+
+- **`PARQUET_MANIFEST_URL`** — the bundle's `manifest.json` URL. On each start the
+  container compares the remote `data_version` to what's on the volume and only
+  re-downloads when it changed. Set it to an **empty string** and mount your own
+  parquet dir at `/data/parquet` to serve a local export instead.
+- **`DUCKDB_THREADS` / `DUCKDB_MEMORY_LIMIT`** — optional DuckDB tuning (default:
+  auto-detect).
+
+### Export the parquet bundle yourself
+
+No clone or `dolt` binary is required — the exporter reads the DoltHub REST API
+(full-table CSV for regular tables, `HEX(payload)` over the JSON API for the one
+blob table) and writes typed, cik-sorted parquet plus a `manifest.json`:
+
+```bash
+python -m sec_app.export_parquet --out ./parquet
+# small/CIK-sliced test export (big tables limited to a few CIKs):
+python -m sec_app.export_parquet --out ./parquet-slice --ciks 320193,789019,1045810
+```
+
+The two large tables (`facts_enc`, `standardized_statements_enc`) are sorted by
+`cik` and sharded to stay under GitHub's 2 GiB/asset limit, so per-CIK lookups
+prune on row-group statistics.
+
+### Refresh & publish
+
+The nightly [DoltHub refresh workflow](.github/workflows/nightly-dolthub.yml) runs
+the exporter after each push and uploads the bundle to the `parquet-latest`
+Release. Build/publish the image with the **Publish DuckDB container image**
+workflow ([.github/workflows/publish-duckdb-image.yml](.github/workflows/publish-duckdb-image.yml)),
+which tags `duckdb-latest` / `duckdb-<date>`.

@@ -27,14 +27,9 @@ def _dolt_hash() -> str:
         if _hash_value is not None and now - _hash_checked_at < _HASH_TTL:
             return _hash_value
         try:
-            from sec_app.db.backend import connect_read
+            from sec_app.db.backend import data_version
 
-            sess = connect_read()
-            try:
-                row = sess.execute("SELECT dolt_hashof_db()").fetchone()
-            finally:
-                sess.close()
-            _hash_value = str(row[0]) if row and row[0] is not None else "unknown"
+            _hash_value = data_version()
         except Exception:
             _hash_value = _hash_value or "unknown"
         _hash_checked_at = now
