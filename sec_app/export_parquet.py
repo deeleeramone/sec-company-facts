@@ -200,41 +200,87 @@ def _bytes_of(out_dir: Path, files: list[str]) -> int:
     return sum((out_dir / f).stat().st_size for f in files)
 
 
-def _server_attach(con, server: str, user: str, password: str) -> None:
+def _pymysql_connect(server: str, user: str, password: str):
+    import pymysql  # pylint: disable=import-outside-toplevel
+
     host, _, rest = server.partition(":")
     port, _, db = rest.partition("/")
     if not host or not port or not db:
         raise SystemExit(f"--server must be host:port/database (got {server!r})")
-    dsn = f"host={host} port={int(port)} user={user} database={db}"
-    if password:
-        dsn += f" password={password}"
-    con.execute("INSTALL mysql")
-    con.execute("LOAD mysql")
-    con.execute(f"ATTACH '{dsn}' AS src (TYPE mysql, READ_ONLY)")
+    return pymysql.connect(
+        host=host, port=int(port), user=user, password=password or "", database=db,
+        charset="utf8mb4", connect_timeout=60, read_timeout=3600,
+    )
 
 
-def _server_data_version(con) -> str:
+def _server_data_version(conn) -> str:
     try:
-        row = con.execute("SELECT v FROM mysql_query('src', 'SELECT dolt_hashof_db() AS v')").fetchone()
+        cur = conn.cursor()
+        cur.execute("SELECT dolt_hashof_db()")
+        row = cur.fetchone()
+        cur.close()
         return str(row[0]) if row and row[0] is not None else "unknown"
     except Exception:
         return "unknown"
 
 
-def _export_server_table(con, table, out_dir, sort, shard_bytes, ciks, scratch_dir) -> list[str]:
+STREAM_BATCH = 50000
+
+
+def _stream_to_parquet(conn, table: str, types: dict[str, str], where: str, dest: str) -> int:
+    # Server-side streaming cursor: pulls rows in batches with bounded client
+    # memory (never materializes the whole table), which the DuckDB mysql
+    # extension does not do reliably for 100M+ row Dolt tables.
+    import pymysql.cursors  # pylint: disable=import-outside-toplevel
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    names = list(types.keys())
+    tps = list(types.values())
+    schema = pa.schema([(n, _arrow_type(t)) for n, t in types.items()])
+    cols_sql = ", ".join(f"`{c}`" for c in names)
+    cur = conn.cursor(pymysql.cursors.SSCursor)
+    cur.execute(f"SELECT {cols_sql} FROM `{table}`{where}")
+    writer = pq.ParquetWriter(dest, schema, compression="zstd")
+    total = 0
+    try:
+        while True:
+            rows = cur.fetchmany(STREAM_BATCH)
+            if not rows:
+                break
+            arrays = []
+            for k, t in enumerate(tps):
+                vals = [r[k] for r in rows]
+                if t == "BOOLEAN":
+                    vals = [None if v is None else bool(v) for v in vals]
+                arrays.append(pa.array(vals, type=_arrow_type(t)))
+            writer.write_table(pa.Table.from_arrays(arrays, names=names))
+            total += len(rows)
+    finally:
+        writer.close()
+        cur.close()
+    return total
+
+
+def _export_server_table(conn, con, table, out_dir, sort, shard_bytes, ciks, scratch_dir) -> list[str]:
     types = _duck_columns(table)
+    where = ""
     if ciks and SORT_KEY in types:
-        # The DuckDB mysql extension mis-pushes IN/OR predicates to Dolt (returns
-        # 0 rows), so a cik slice goes through mysql_query passthrough, which sends
-        # the predicate to Dolt verbatim. Backtick the columns (end/start/rank are
-        # reserved) and double the quotes for the enclosing DuckDB string literal.
-        inner_cols = ", ".join(f"`{c}`" for c in types)
-        in_list = ", ".join("''" + c + "''" for c in ciks)
-        relation = f"mysql_query('src', 'SELECT {inner_cols} FROM {table} WHERE cik IN ({in_list})')"
-    else:
-        relation = f'src."{table}"'
-    print(f"[export] {table} <- server (sort={sort and table in BIG_TABLES}) ...", flush=True)
-    return _write_table(con, table, relation, out_dir, sort, shard_bytes, scratch_dir)
+        where = " WHERE cik IN (" + ", ".join(_sql_quote(c) for c in ciks) + ")"
+    big = table in BIG_TABLES
+    print(f"[export] {table} <- server (stream){' + sort' if big and sort else ''} ...", flush=True)
+    if not big:
+        dest = out_dir / f"{table}.parquet"
+        _stream_to_parquet(conn, table, types, where, str(dest))
+        return [f"{table}.parquet"]
+    raw = scratch_dir / f"_{table}_raw.parquet"
+    _stream_to_parquet(conn, table, types, where, str(raw))
+    raw_q = str(raw).replace("'", "''")
+    order = f' ORDER BY "{SORT_KEY}"' if sort else ""
+    try:
+        return _copy_parquet(con, f"SELECT * FROM read_parquet('{raw_q}'){order}", out_dir / table, True, shard_bytes)
+    finally:
+        raw.unlink(missing_ok=True)
 
 
 def _json_query(owner: str, repo: str, branch: str, sql: str, attempts: int = 4) -> list[dict]:
@@ -436,9 +482,10 @@ def run_export(
     scratch.mkdir(parents=True, exist_ok=True)
 
     tdir = None
+    conn = None
     if source == "server":
-        _server_attach(con, server, server_user, server_password)
-        version = _server_data_version(con)
+        conn = _pymysql_connect(server, server_user, server_password)
+        version = _server_data_version(conn)
     else:
         version = _rest_data_version(owner, repo, branch)
         tdir = Path(tmp_dir) if tmp_dir else (out_dir / "_tmp")
@@ -447,7 +494,7 @@ def run_export(
     manifest_tables: dict[str, dict] = {}
     for table in tables:
         if source == "server":
-            files = _export_server_table(con, table, out_dir, sort, shard_bytes, ciks, scratch)
+            files = _export_server_table(conn, con, table, out_dir, sort, shard_bytes, ciks, scratch)
         elif table == "submissions":
             files = _export_submissions_rest(owner, repo, branch, out_dir, ciks)
         elif ciks and table in BIG_TABLES:
@@ -459,6 +506,8 @@ def run_export(
         manifest_tables[table] = {"files": files, "rows": rows, "bytes": _bytes_of(out_dir, files)}
         print(f"[export] {table}: {rows} rows, {len(files)} file(s)", flush=True)
 
+    if conn is not None:
+        conn.close()
     if tdir is not None:
         shutil.rmtree(tdir, ignore_errors=True)
 
