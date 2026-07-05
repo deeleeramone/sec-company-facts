@@ -1,0 +1,61 @@
+name: Build DuckDB parquet bundle
+
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'DoltHub branch to export'
+        type: string
+        default: main
+  workflow_run:
+    workflows: ["Nightly DoltHub refresh"]
+    types: [completed]
+
+concurrency:
+  group: build-parquet-bundle
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      OWNER: deeleeramone
+      REPO: sec-company-facts
+      BRANCH: ${{ github.event.inputs.branch || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install sec-app (duckdb + pyarrow; no dolt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Export parquet from the DoltHub REST API (no clone)
+        env:
+          DUCKDB_MEMORY_LIMIT: 2GB
+        run: |
+          mkdir -p parquet-out
+          python -m sec_app.export_parquet \
+            --source rest --owner "$OWNER" --repo "$REPO" --branch "$BRANCH" \
+            --out parquet-out --shard-bytes 1500MB
+          ls -lh parquet-out
+
+      - name: Publish bundle to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view parquet-latest >/dev/null 2>&1 \
+            || gh release create parquet-latest \
+                 --title "SEC parquet bundle (latest)" \
+                 --notes "DuckDB-ready parquet export of the SEC dataset"
+          gh release upload parquet-latest parquet-out/*.parquet --clobber
+          gh release upload parquet-latest parquet-out/manifest.json --clobber

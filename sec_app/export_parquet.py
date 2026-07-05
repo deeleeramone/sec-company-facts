@@ -4,8 +4,8 @@ import argparse
 import binascii
 import json
 import os
-import shutil
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -208,8 +208,14 @@ def _pymysql_connect(server: str, user: str, password: str):
     if not host or not port or not db:
         raise SystemExit(f"--server must be host:port/database (got {server!r})")
     return pymysql.connect(
-        host=host, port=int(port), user=user, password=password or "", database=db,
-        charset="utf8mb4", connect_timeout=60, read_timeout=3600,
+        host=host,
+        port=int(port),
+        user=user,
+        password=password or "",
+        database=db,
+        charset="utf8mb4",
+        connect_timeout=60,
+        read_timeout=3600,
     )
 
 
@@ -310,21 +316,45 @@ def _rest_data_version(owner: str, repo: str, branch: str) -> str:
     return str(rows[0]["v"]) if rows else "unknown"
 
 
-def _download_csv(url: str, dest: Path, attempts: int = 3) -> None:
-    # Plain full GET. DuckDB httpfs must NOT be used here: DoltHub ignores HTTP
-    # Range requests (returns 200 + full body), so range-based readers corrupt
-    # the stream on large tables. A single sequential GET is clean.
+def _stream_csv_to_parquet(con, url, types, target: Path, big: bool, shard_bytes: str) -> list[str]:
     last_err: Exception | None = None
-    for i in range(attempts):
+    for attempt in range(3):
+        r, w = os.pipe()
+        err: dict = {}
+
+        def _pump(w=w, err=err):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "sec-app-export"})
+                with urllib.request.urlopen(req, timeout=3600) as resp:
+                    while True:
+                        chunk = resp.read(1 << 20)
+                        if not chunk:
+                            break
+                        os.write(w, chunk)
+            except Exception as exc:  # noqa: BLE001
+                err["e"] = exc
+            finally:
+                os.close(w)
+
+        thread = threading.Thread(target=_pump)
+        thread.start()
+        src = _read_csv_expr(f"/proc/self/fd/{r}", types)
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "sec-app-export"})
-            with urllib.request.urlopen(req, timeout=3600) as resp, open(dest, "wb") as fh:
-                shutil.copyfileobj(resp, fh, length=1 << 20)
-            return
-        except Exception as err:  # noqa: BLE001
-            last_err = err
-            print(f"[export] download attempt {i + 1}/{attempts} failed: {err}", flush=True)
-    raise RuntimeError(f"failed to download {url}: {last_err}")
+            files = _copy_parquet(con, f"SELECT * FROM {src}", target, big, shard_bytes)
+            thread.join()
+            os.close(r)
+            if err:
+                raise err["e"]
+            return files
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            thread.join()
+            try:
+                os.close(r)
+            except OSError:
+                pass
+            print(f"[export] stream attempt {attempt + 1}/3 failed for {url}: {exc}", flush=True)
+    raise RuntimeError(f"failed to stream {url}: {last_err}")
 
 
 def _read_csv_expr(csv_path: str, types: dict[str, str]) -> str:
@@ -333,17 +363,12 @@ def _read_csv_expr(csv_path: str, types: dict[str, str]) -> str:
     return f"read_csv('{p}', header=true, columns={cols}, nullstr='', quote='\"', escape='\"')"
 
 
-def _export_csv_table(con, owner, repo, branch, table, out_dir, tmp_dir, sort, shard_bytes) -> list[str]:
+def _export_csv_table(con, owner, repo, branch, table, out_dir, sort, shard_bytes) -> list[str]:
     url = f"{CSV_BASE}/{owner}/{repo}/{branch}/{table}"
-    csv_path = tmp_dir / f"{table}.csv"
-    print(f"[export] downloading {table} csv ...", flush=True)
-    _download_csv(url, csv_path)
-    relation = _read_csv_expr(str(csv_path), TABLE_TYPES[table])
-    print(f"[export] {table} -> parquet (sort={sort and table in BIG_TABLES}) ...", flush=True)
-    try:
-        return _write_table(con, table, relation, out_dir, sort, shard_bytes, tmp_dir)
-    finally:
-        csv_path.unlink(missing_ok=True)
+    big = table in BIG_TABLES
+    target = (out_dir / table) if big else (out_dir / f"{table}.parquet")
+    print(f"[export] {table} <- REST stream ...", flush=True)
+    return _stream_csv_to_parquet(con, url, TABLE_TYPES[table], target, big, shard_bytes)
 
 
 def _coerce(value, duck_type: str):
@@ -478,18 +503,15 @@ def run_export(
     if mem:
         con.execute(f"SET memory_limit = '{mem}'")
 
-    scratch = Path(spill) if spill else (out_dir / "_scratch")
-    scratch.mkdir(parents=True, exist_ok=True)
-
-    tdir = None
     conn = None
+    scratch = None
     if source == "server":
+        scratch = Path(spill) if spill else (out_dir / "_scratch")
+        scratch.mkdir(parents=True, exist_ok=True)
         conn = _pymysql_connect(server, server_user, server_password)
         version = _server_data_version(conn)
     else:
         version = _rest_data_version(owner, repo, branch)
-        tdir = Path(tmp_dir) if tmp_dir else (out_dir / "_tmp")
-        tdir.mkdir(parents=True, exist_ok=True)
 
     manifest_tables: dict[str, dict] = {}
     for table in tables:
@@ -501,15 +523,13 @@ def run_export(
             print(f"[export] slice {table} for {len(ciks)} ciks via JSON ...", flush=True)
             files = _export_json_slice(owner, repo, branch, table, ciks, out_dir)
         else:
-            files = _export_csv_table(con, owner, repo, branch, table, out_dir, tdir, sort, shard_bytes)
+            files = _export_csv_table(con, owner, repo, branch, table, out_dir, sort, shard_bytes)
         rows = _parquet_count(con, out_dir, files)
         manifest_tables[table] = {"files": files, "rows": rows, "bytes": _bytes_of(out_dir, files)}
         print(f"[export] {table}: {rows} rows, {len(files)} file(s)", flush=True)
 
     if conn is not None:
         conn.close()
-    if tdir is not None:
-        shutil.rmtree(tdir, ignore_errors=True)
 
     manifest = {
         "format_version": 1,
