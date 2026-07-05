@@ -111,7 +111,7 @@ jobs:
         if: ${{ ! inputs.skip_push }}
         env:
           DUCKDB_TEMP_DIR: /mnt/duckdb-tmp
-          DUCKDB_MEMORY_LIMIT: 5GB
+          DUCKDB_MEMORY_LIMIT: 2GB
         run: |
           sudo mkdir -p /mnt/duckdb-tmp /mnt/parquet-out
           sudo chown "$(id -un)" /mnt/duckdb-tmp /mnt/parquet-out
