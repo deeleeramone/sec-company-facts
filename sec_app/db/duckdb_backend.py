@@ -59,7 +59,7 @@ def _init():
         conn.execute("CREATE OR REPLACE MACRO date_format(d, fmt) AS strftime(d, fmt)")
 
         for table, info in manifest.get("tables", {}).items():
-            files = [str(pdir / f) for f in info.get("files", [])]
+            files = [str(pdir / f["name"]) for f in info.get("files", [])]
             if not files:
                 continue
             file_list = ", ".join(_quote_path(f) for f in files)

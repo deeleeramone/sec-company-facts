@@ -9,62 +9,79 @@ manifest_value() {
     python -c "import json,sys;print(json.load(open(sys.argv[1])).get('data_version',''))" "$1" 2>/dev/null || echo ""
 }
 
-# Downloads the bundle to a staging dir and atomically swaps it in ONLY if every
-# manifest-listed file materialized. Returns non-zero (leaving the existing volume
-# untouched) on any failure, so the caller can fall back to serving existing data
-# and a later restart retries — never a half-swapped, version-committed bundle.
 fetch_bundle() {
-    local base tmp_manifest files_list remote_ver local_ver staging f
+    local base tmp_manifest plan remote_ver local_ver staging act name reused=0 fetched=0
     base="${PARQUET_BASE_URL:-${MANIFEST_URL%/*}}"
     tmp_manifest="$(mktemp)"
-    files_list="$(mktemp)"
+    plan="$(mktemp)"
     echo "[entrypoint] fetching manifest ${MANIFEST_URL}"
     if ! curl -fsSL --retry 5 --retry-delay 3 -o "${tmp_manifest}" "${MANIFEST_URL}"; then
         echo "[entrypoint] WARN: could not fetch manifest" >&2
-        rm -f "${tmp_manifest}" "${files_list}"; return 1
+        rm -f "${tmp_manifest}" "${plan}"; return 1
     fi
     remote_ver="$(manifest_value "${tmp_manifest}")"
     local_ver="$(manifest_value "${PARQUET_DIR}/manifest.json")"
     if [ -n "${local_ver}" ] && [ "${remote_ver}" = "${local_ver}" ]; then
-        echo "[entrypoint] parquet already current (data_version=${local_ver}); skipping download"
-        rm -f "${tmp_manifest}" "${files_list}"; return 0
+        echo "[entrypoint] parquet already current (data_version=${local_ver}); skipping"
+        rm -f "${tmp_manifest}" "${plan}"; return 0
     fi
-    echo "[entrypoint] downloading parquet bundle (remote=${remote_ver:-?} local=${local_ver:-none})"
-    if ! python -c "import json,sys;m=json.load(open(sys.argv[1]));print('\n'.join(f for t in m['tables'].values() for f in t['files']))" "${tmp_manifest}" > "${files_list}"; then
-        echo "[entrypoint] WARN: could not parse manifest file list" >&2
-        rm -f "${tmp_manifest}" "${files_list}"; return 1
+    echo "[entrypoint] syncing parquet bundle (remote=${remote_ver:-?} local=${local_ver:-none})"
+    if ! python - "${tmp_manifest}" "${PARQUET_DIR}/manifest.json" > "${plan}" <<'PYEOF'
+import json, sys
+rem = json.load(open(sys.argv[1]))
+try:
+    loc = json.load(open(sys.argv[2]))
+except Exception:
+    loc = {}
+have = {}
+for t in (loc.get("tables") or {}).values():
+    for f in t.get("files", []):
+        have[f["name"]] = f.get("sha256")
+for t in rem.get("tables", {}).values():
+    for f in t.get("files", []):
+        act = "REUSE" if have.get(f["name"]) == f["sha256"] else "FETCH"
+        print(act + "\t" + f["name"])
+PYEOF
+    then
+        echo "[entrypoint] WARN: could not parse manifest" >&2
+        rm -f "${tmp_manifest}" "${plan}"; return 1
     fi
-    if [ ! -s "${files_list}" ]; then
+    if [ ! -s "${plan}" ]; then
         echo "[entrypoint] WARN: manifest lists no files" >&2
-        rm -f "${tmp_manifest}" "${files_list}"; return 1
+        rm -f "${tmp_manifest}" "${plan}"; return 1
     fi
     staging="${DATA_DIR}/parquet.new"
     rm -rf "${staging}"
     mkdir -p "${staging}"
-    while IFS= read -r f; do
-        [ -n "${f}" ] || continue
-        echo "[entrypoint]   ${f}"
-        if ! curl -fsSL --retry 5 --retry-delay 3 -o "${staging}/${f}" "${base}/${f}"; then
-            echo "[entrypoint] WARN: download failed for ${f}" >&2
-            rm -rf "${staging}"; rm -f "${tmp_manifest}" "${files_list}"; return 1
+    while IFS=$'\t' read -r act name; do
+        [ -n "${name}" ] || continue
+        if [ "${act}" = REUSE ] && [ -f "${PARQUET_DIR}/${name}" ]; then
+            ln "${PARQUET_DIR}/${name}" "${staging}/${name}" 2>/dev/null \
+                || cp "${PARQUET_DIR}/${name}" "${staging}/${name}"
+            reused=$((reused + 1))
+        elif ! curl -fsSL --retry 5 --retry-delay 3 -o "${staging}/${name}" "${base}/${name}"; then
+            echo "[entrypoint] WARN: download failed for ${name}" >&2
+            rm -rf "${staging}"; rm -f "${tmp_manifest}" "${plan}"; return 1
+        else
+            fetched=$((fetched + 1))
         fi
-    done < "${files_list}"
-    while IFS= read -r f; do
-        [ -n "${f}" ] || continue
-        if [ ! -s "${staging}/${f}" ]; then
-            echo "[entrypoint] WARN: ${f} missing/empty after download" >&2
-            rm -rf "${staging}"; rm -f "${tmp_manifest}" "${files_list}"; return 1
+    done < "${plan}"
+    while IFS=$'\t' read -r act name; do
+        [ -n "${name}" ] || continue
+        if [ ! -s "${staging}/${name}" ]; then
+            echo "[entrypoint] WARN: ${name} missing/empty after sync" >&2
+            rm -rf "${staging}"; rm -f "${tmp_manifest}" "${plan}"; return 1
         fi
-    done < "${files_list}"
+    done < "${plan}"
     cp "${tmp_manifest}" "${staging}/manifest.json"
-    rm -f "${tmp_manifest}" "${files_list}"
+    rm -f "${tmp_manifest}" "${plan}"
     rm -rf "${DATA_DIR}/parquet.old"
     if [ -d "${PARQUET_DIR}" ]; then
         mv "${PARQUET_DIR}" "${DATA_DIR}/parquet.old"
     fi
     mv "${staging}" "${PARQUET_DIR}"
     rm -rf "${DATA_DIR}/parquet.old"
-    echo "[entrypoint] parquet bundle ready (data_version=${remote_ver})"
+    echo "[entrypoint] parquet ready (data_version=${remote_ver}; reused=${reused} fetched=${fetched})"
 }
 
 if [ -n "${MANIFEST_URL}" ]; then

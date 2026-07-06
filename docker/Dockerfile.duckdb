@@ -1,10 +1,5 @@
 FROM python:3.12-slim-bookworm
 
-# Code-only image. It does NOT bake the database in. On first start the
-# entrypoint downloads a published parquet bundle (a GitHub Release asset set)
-# into the /data volume and serves it directly with embedded DuckDB — no Dolt
-# server, no MySQL, no clone.
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

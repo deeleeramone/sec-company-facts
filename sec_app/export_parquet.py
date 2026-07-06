@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import hashlib
 import json
 import os
+import shutil
 import sys
 import threading
 import urllib.error
@@ -22,6 +24,7 @@ API_BASE = "https://www.dolthub.com/api/v1alpha1"
 BIG_TABLES = frozenset({"facts_enc", "standardized_statements_enc"})
 SORT_KEY = "cik"
 BLOB_PAGE = 20
+NUM_BUCKETS = 64
 
 TABLE_TYPES: dict[str, dict[str, str]] = {
     "cik_canonical": {"cik": "VARCHAR", "primary_cik": "VARCHAR"},
@@ -134,44 +137,43 @@ def _order_clause(table: str, sort: bool, types: dict[str, str]) -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Shared DuckDB parquet writer (typed projection -> sorted/sharded parquet).
-# ---------------------------------------------------------------------------
 
-
-def _shard_index(path: Path) -> int:
-    stem = path.stem.split("_")[-1]
-    return int(stem) if stem.isdigit() else 0
-
-
-def _copy_parquet(con, select_sql: str, target: Path, big: bool, shard_bytes: str) -> list[str]:
+def _copy_parquet(con, select_sql: str, target: Path, big: bool, num_buckets: str) -> list[str]:
     if not big:
         con.execute(
             f"COPY ({select_sql}) TO '{str(target).replace(chr(39), chr(39) * 2)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
         )
         return [target.name]
 
-    shard_dir = target.parent / f"_{target.name}"
+    part_dir = target.parent / f"_{target.name}_parts"
+    if part_dir.exists():
+        shutil.rmtree(part_dir)
+    for stale in target.parent.glob(f"{target.name}-b*.parquet"):
+        stale.unlink()
+    q = str(part_dir).replace(chr(39), chr(39) * 2)
+    con.execute(f"SET partitioned_write_max_open_files = {int(num_buckets)}")
     con.execute("SET threads = 1")
     try:
         con.execute(
-            f"COPY ({select_sql}) TO '{str(shard_dir).replace(chr(39), chr(39) * 2)}' "
-            f"(FORMAT PARQUET, COMPRESSION ZSTD, FILE_SIZE_BYTES '{shard_bytes}', OVERWRITE_OR_IGNORE true)"
+            f"COPY (SELECT *, (CAST(cik AS BIGINT) % {int(num_buckets)}) AS _bkt FROM ({select_sql})) "
+            f"TO '{q}' (FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (_bkt), OVERWRITE_OR_IGNORE true)"
         )
     finally:
         con.execute("RESET threads")
-
+        con.execute("RESET partitioned_write_max_open_files")
     files: list[str] = []
-    for i, shard in enumerate(sorted(shard_dir.glob("*.parquet"), key=_shard_index)):
-        name = f"{target.name}-{i}.parquet"
-        shard.rename(target.parent / name)
-        files.append(name)
-    shard_dir.rmdir()
-    return files
+    for sub in part_dir.glob("_bkt=*"):
+        b = int(sub.name.split("=")[1])
+        for j, part in enumerate(sorted(sub.glob("*.parquet"))):
+            name = f"{target.name}-b{b:05d}" + (f"-{j}" if j else "") + ".parquet"
+            part.rename(target.parent / name)
+            files.append(name)
+    shutil.rmtree(part_dir)
+    return sorted(files)
 
 
 def _write_table(
-    con, table: str, relation: str, out_dir: Path, sort: bool, shard_bytes: str, scratch_dir: Path
+    con, table: str, relation: str, out_dir: Path, sort: bool, num_buckets: str, scratch_dir: Path
 ) -> list[str]:
     types = _duck_columns(table)
     cols = ", ".join(f'CAST("{c}" AS {t}) AS "{c}"' for c, t in types.items())
@@ -179,16 +181,24 @@ def _write_table(
 
     if not (big and sort):
         target = (out_dir / table) if big else (out_dir / f"{table}.parquet")
-        return _copy_parquet(con, f"SELECT {cols} FROM {relation}", target, big, shard_bytes)
+        return _copy_parquet(con, f"SELECT {cols} FROM {relation}", target, big, num_buckets)
 
     raw = scratch_dir / f"_{table}_raw.parquet"
     raw_q = str(raw).replace("'", "''")
     con.execute(f"COPY (SELECT {cols} FROM {relation}) TO '{raw_q}' (FORMAT PARQUET, COMPRESSION ZSTD)")
     try:
         sorted_sql = f"SELECT * FROM read_parquet('{raw_q}') ORDER BY \"{SORT_KEY}\""
-        return _copy_parquet(con, sorted_sql, out_dir / table, True, shard_bytes)
+        return _copy_parquet(con, sorted_sql, out_dir / table, True, num_buckets)
     finally:
         raw.unlink(missing_ok=True)
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _parquet_count(con, out_dir: Path, files: list[str]) -> int:
@@ -234,9 +244,6 @@ STREAM_BATCH = 50000
 
 
 def _stream_to_parquet(conn, table: str, types: dict[str, str], where: str, dest: str) -> int:
-    # Server-side streaming cursor: pulls rows in batches with bounded client
-    # memory (never materializes the whole table), which the DuckDB mysql
-    # extension does not do reliably for 100M+ row Dolt tables.
     import pymysql.cursors  # pylint: disable=import-outside-toplevel
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -268,7 +275,7 @@ def _stream_to_parquet(conn, table: str, types: dict[str, str], where: str, dest
     return total
 
 
-def _export_server_table(conn, con, table, out_dir, sort, shard_bytes, ciks, scratch_dir) -> list[str]:
+def _export_server_table(conn, con, table, out_dir, sort, num_buckets, ciks, scratch_dir) -> list[str]:
     types = _duck_columns(table)
     where = ""
     if ciks and SORT_KEY in types:
@@ -284,7 +291,7 @@ def _export_server_table(conn, con, table, out_dir, sort, shard_bytes, ciks, scr
     raw_q = str(raw).replace("'", "''")
     order = f' ORDER BY "{SORT_KEY}"' if sort else ""
     try:
-        return _copy_parquet(con, f"SELECT * FROM read_parquet('{raw_q}'){order}", out_dir / table, True, shard_bytes)
+        return _copy_parquet(con, f"SELECT * FROM read_parquet('{raw_q}'){order}", out_dir / table, True, num_buckets)
     finally:
         raw.unlink(missing_ok=True)
 
@@ -316,7 +323,12 @@ def _rest_data_version(owner: str, repo: str, branch: str) -> str:
     return str(rows[0]["v"]) if rows else "unknown"
 
 
-def _stream_csv_to_parquet(con, url, types, target: Path, big: bool, shard_bytes: str) -> list[str]:
+def _rest_count(owner: str, repo: str, branch: str, table: str) -> int:
+    rows = _json_query(owner, repo, branch, f"SELECT COUNT(*) AS n FROM {table}")
+    return int(rows[0]["n"])
+
+
+def _stream_csv_to_parquet(con, url, types, target: Path, big: bool, num_buckets: str, expected_rows: int) -> list[str]:
     last_err: Exception | None = None
     for attempt in range(3):
         r, w = os.pipe()
@@ -340,11 +352,14 @@ def _stream_csv_to_parquet(con, url, types, target: Path, big: bool, shard_bytes
         thread.start()
         src = _read_csv_expr(f"/proc/self/fd/{r}", types)
         try:
-            files = _copy_parquet(con, f"SELECT * FROM {src}", target, big, shard_bytes)
+            files = _copy_parquet(con, f"SELECT * FROM {src}", target, big, num_buckets)
             thread.join()
             os.close(r)
             if err:
                 raise err["e"]
+            got = _parquet_count(con, target.parent, files)
+            if got != expected_rows:
+                raise RuntimeError(f"row count mismatch: got {got}, expected {expected_rows}")
             return files
         except Exception as exc:  # noqa: BLE001
             last_err = exc
@@ -363,12 +378,13 @@ def _read_csv_expr(csv_path: str, types: dict[str, str]) -> str:
     return f"read_csv('{p}', header=true, columns={cols}, nullstr='', quote='\"', escape='\"')"
 
 
-def _export_csv_table(con, owner, repo, branch, table, out_dir, sort, shard_bytes) -> list[str]:
+def _export_csv_table(con, owner, repo, branch, table, out_dir, sort, num_buckets) -> list[str]:
     url = f"{CSV_BASE}/{owner}/{repo}/{branch}/{table}"
     big = table in BIG_TABLES
     target = (out_dir / table) if big else (out_dir / f"{table}.parquet")
-    print(f"[export] {table} <- REST stream ...", flush=True)
-    return _stream_csv_to_parquet(con, url, TABLE_TYPES[table], target, big, shard_bytes)
+    expected = _rest_count(owner, repo, branch, table)
+    print(f"[export] {table} <- REST stream ({expected} rows) ...", flush=True)
+    return _stream_csv_to_parquet(con, url, TABLE_TYPES[table], target, big, num_buckets, expected)
 
 
 def _coerce(value, duck_type: str):
@@ -414,7 +430,25 @@ def _write_arrow(out_path: Path, columns: dict[str, str], data: dict[str, list])
     pq.write_table(table, out_path, compression="zstd")
 
 
-def _export_submissions_rest(owner, repo, branch, out_dir, ciks) -> list[str]:
+def _write_arrow_bucketed(out_dir: Path, table: str, columns: dict[str, str], data: dict[str, list], num_buckets: int) -> list[str]:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    schema = pa.schema([(n, _arrow_type(t)) for n, t in columns.items()])
+    by_bucket: dict[int, list[int]] = {}
+    for i, cik in enumerate(data["cik"]):
+        by_bucket.setdefault(int(cik) % num_buckets, []).append(i)
+    files: list[str] = []
+    for b in sorted(by_bucket):
+        idx = by_bucket[b]
+        arrays = {n: pa.array([data[n][i] for i in idx], type=_arrow_type(t)) for n, t in columns.items()}
+        name = f"{table}-b{b:05d}.parquet"
+        pq.write_table(pa.table(arrays, schema=schema), out_dir / name, compression="zstd")
+        files.append(name)
+    return files
+
+
+def _export_submissions_rest(owner, repo, branch, out_dir, ciks, num_buckets) -> list[str]:
     print("[export] submissions <- JSON HEX (keyset) ...", flush=True)
     types = TABLE_TYPES["submissions"]
     data: dict[str, list] = {"cik": [], "payload": [], "source_mtime": []}
@@ -439,8 +473,7 @@ def _export_submissions_rest(owner, repo, branch, out_dir, ciks) -> list[str]:
         if len(rows) < BLOB_PAGE:
             break
     print(f"[export] submissions: {total} rows", flush=True)
-    _write_arrow(out_dir / "submissions.parquet", types, data)
-    return ["submissions.parquet"]
+    return _write_arrow_bucketed(out_dir, "submissions", types, data, num_buckets)
 
 
 def _export_json_slice(owner, repo, branch, table, ciks, out_dir) -> list[str]:
@@ -485,7 +518,7 @@ def run_export(
     out,
     tables,
     sort,
-    shard_bytes,
+    num_buckets,
     ciks,
     tmp_dir,
 ):
@@ -516,23 +549,23 @@ def run_export(
     manifest_tables: dict[str, dict] = {}
     for table in tables:
         if source == "server":
-            files = _export_server_table(conn, con, table, out_dir, sort, shard_bytes, ciks, scratch)
+            files = _export_server_table(conn, con, table, out_dir, sort, num_buckets, ciks, scratch)
         elif table == "submissions":
-            files = _export_submissions_rest(owner, repo, branch, out_dir, ciks)
+            files = _export_submissions_rest(owner, repo, branch, out_dir, ciks, num_buckets)
         elif ciks and table in BIG_TABLES:
             print(f"[export] slice {table} for {len(ciks)} ciks via JSON ...", flush=True)
             files = _export_json_slice(owner, repo, branch, table, ciks, out_dir)
         else:
-            files = _export_csv_table(con, owner, repo, branch, table, out_dir, sort, shard_bytes)
+            files = _export_csv_table(con, owner, repo, branch, table, out_dir, sort, num_buckets)
         rows = _parquet_count(con, out_dir, files)
-        manifest_tables[table] = {"files": files, "rows": rows, "bytes": _bytes_of(out_dir, files)}
+        entries = [{"name": f, "sha256": _sha256(out_dir / f), "bytes": (out_dir / f).stat().st_size} for f in files]
+        manifest_tables[table] = {"files": entries, "rows": rows}
         print(f"[export] {table}: {rows} rows, {len(files)} file(s)", flush=True)
 
     if conn is not None:
         conn.close()
 
     manifest = {
-        "format_version": 1,
         "data_version": version,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "source": {"mode": source, "owner": owner, "repo": repo, "branch": branch, "server": server},
@@ -564,7 +597,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="Output directory for parquet + manifest.json")
     parser.add_argument("--tables", default="", help="Comma-separated subset (default: all)")
     parser.add_argument("--no-sort", action="store_true", help="Skip cik sort of big tables (lighter export)")
-    parser.add_argument("--shard-bytes", default="1500MB", help="Target parquet shard size for big tables")
+    parser.add_argument("--buckets", type=int, default=NUM_BUCKETS, help="Number of cik buckets for big tables")
     parser.add_argument("--ciks", default="", help="Comma-separated CIK slice (test exports)")
     parser.add_argument("--tmp-dir", default="", help="[rest] scratch dir for downloaded CSVs (default: <out>/_tmp)")
     args = parser.parse_args(argv)
@@ -589,7 +622,7 @@ def main(argv: list[str] | None = None) -> int:
         out=args.out,
         tables=tables,
         sort=not args.no_sort,
-        shard_bytes=args.shard_bytes,
+        num_buckets=args.buckets,
         ciks=ciks,
         tmp_dir=args.tmp_dir or None,
     )

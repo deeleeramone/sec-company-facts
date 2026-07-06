@@ -1,9 +1,5 @@
 name: Publish DuckDB container image
 
-# Manual only. Builds the code-only DuckDB image (no Dolt, no MySQL). It does NOT
-# bake data in — on first start the container downloads the published parquet
-# bundle (the `parquet-latest` Release, refreshed nightly) into its volume and
-# serves it directly with embedded DuckDB.
 on:
   workflow_dispatch:
 
