@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -329,8 +330,9 @@ def _rest_count(owner: str, repo: str, branch: str, table: str) -> int:
 
 
 def _stream_csv_to_parquet(con, url, types, target: Path, big: bool, num_buckets: str, expected_rows: int) -> list[str]:
+    attempts = 6
     last_err: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(attempts):
         r, w = os.pipe()
         err: dict = {}
 
@@ -368,8 +370,12 @@ def _stream_csv_to_parquet(con, url, types, target: Path, big: bool, num_buckets
                 os.close(r)
             except OSError:
                 pass
-            print(f"[export] stream attempt {attempt + 1}/3 failed for {url}: {exc}", flush=True)
-    raise RuntimeError(f"failed to stream {url}: {last_err}")
+            print(f"[export] stream attempt {attempt + 1}/{attempts} failed for {url}: {exc}", flush=True)
+            if attempt + 1 < attempts:
+                delay = min(300, 15 * 2 ** attempt)
+                print(f"[export] backing off {delay}s (DoltHub likely rate-limited) before retry", flush=True)
+                time.sleep(delay)
+    raise RuntimeError(f"failed to stream {url} after {attempts} attempts: {last_err}")
 
 
 def _read_csv_expr(csv_path: str, types: dict[str, str]) -> str:

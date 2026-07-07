@@ -18,7 +18,11 @@ def main() -> int:
         old = json.load(open(sys.argv[2]))
     except Exception:
         old = {}
-    new_files, old_files = _files(new), _files(old)
+    new_files = _files(new)
+    try:
+        old_files = _files(old)
+    except Exception:
+        old_files = {}
     for name, sha in new_files.items():
         if old_files.get(name) != sha:
             print("UP\t" + name)
