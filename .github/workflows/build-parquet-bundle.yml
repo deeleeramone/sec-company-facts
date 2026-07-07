@@ -46,7 +46,7 @@ jobs:
           mkdir -p parquet-out
           python -m sec_app.export_parquet \
             --source rest --owner "$OWNER" --repo "$REPO" --branch "$BRANCH" \
-            --out parquet-out --shard-bytes 1500MB
+            --out parquet-out
           ls -lh parquet-out
 
       - name: Publish bundle to GitHub Release
