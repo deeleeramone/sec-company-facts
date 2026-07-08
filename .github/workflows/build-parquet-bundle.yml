@@ -59,11 +59,15 @@ jobs:
                  --notes "DuckDB-ready parquet export of the SEC dataset"
           gh release download parquet-latest -p manifest.json -O old-manifest.json 2>/dev/null || echo '{}' > old-manifest.json
           python scripts/manifest_diff.py parquet-out/manifest.json old-manifest.json > sync.txt
-          up=0; rm=0
+          up=0
           while IFS=$'\t' read -r act name; do
-            [ -n "$name" ] || continue
-            if [ "$act" = UP ]; then gh release upload parquet-latest "parquet-out/$name" --clobber; up=$((up+1)); fi
-            if [ "$act" = RM ]; then gh release delete-asset parquet-latest "$name" -y 2>/dev/null || true; rm=$((rm+1)); fi
+            [ "$act" = UP ] && [ -n "$name" ] || continue
+            gh release upload parquet-latest "parquet-out/$name" --clobber; up=$((up+1))
           done < sync.txt
-          echo "uploaded=$up deleted=$rm (of $(ls parquet-out/*.parquet | wc -l) total files)"
           gh release upload parquet-latest parquet-out/manifest.json --clobber
+          python -c "import json; m=json.load(open('parquet-out/manifest.json')); print('manifest.json'); [print(f['name']) for t in m['tables'].values() for f in t['files']]" > keep.txt
+          pruned=0
+          for asset in $(gh release view parquet-latest --json assets -q '.assets[].name'); do
+            grep -qxF "$asset" keep.txt || { gh release delete-asset parquet-latest "$asset" -y && pruned=$((pruned+1)); }
+          done
+          echo "uploaded=$up pruned=$pruned (manifest lists $(( $(wc -l < keep.txt) - 1 )) files)"
